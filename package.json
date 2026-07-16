@@ -1,0 +1,9 @@
+{
+  "name": "q0-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter stats-app dev",
+    "build": "pnpm --recursive build"
+  }
+}
