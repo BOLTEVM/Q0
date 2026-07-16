@@ -1,4 +1,11 @@
+<div align="center">
+
+<img src="0logov3.png" width="300" alt="Q0 Logo" />
+
 # ⚡ Q0 Analytics & Quaiswap LP Dashboard
+
+</div>
+
 
 A premium, glassmorphic analytics monorepo designed for the **Q0 (QBOLT)** token contract on the **Quai Network** (`Cyprus-1` shard). This application displays real-time on-chain statistics, holder statistics, dynamic transaction ledgers, and integrates an on-chain Swap simulator/execution module interfacing directly with the Quaiswap Liquidity Pools.
 
