@@ -11,6 +11,7 @@ export interface Q0SwapTxRequest {
     timeoutMs?: number;
     swapPair?: string;
     minOutputAmount?: string;
+    quaiShard?: string;
 }
 
 export interface Q0SwapTxResult {
@@ -22,15 +23,15 @@ export interface Q0SwapTxResult {
 }
 
 /**
- * Q0 Layer 0 Wallet & Swap Pipeline
- * Native Web3 transaction execution pipeline for q0 quantum layer-0 stack folder.
+ * Q0 Quaiswap & Quai Network Wallet Pipeline
+ * Native Web3 transaction execution pipeline for q0 Quaiswap repository.
  * Operates 100% standalone if 'theguards' package is not installed.
  */
 export class Q0WalletPipeline {
     public static async executeAndAwaitTransaction(
         req: Q0SwapTxRequest
     ): Promise<Q0SwapTxResult> {
-        console.log(`[Q0WalletPipeline] Executing Layer-0 swap transaction for [${req.swapPair || 'SWAP'}] to ${req.to}...`);
+        console.log(`[Q0WalletPipeline] Executing Quaiswap transaction on [${req.quaiShard || 'Cyprus-1'}] for pair [${req.swapPair || 'SWAP'}] to ${req.to}...`);
 
         try {
             const guards = require('../../../../../../theguards');
@@ -49,7 +50,7 @@ export class Q0WalletPipeline {
             return { success: false, error: `Invalid recipient address: "${req.to}"` };
         }
 
-        const rpcUrl = req.rpcUrl || 'http://127.0.0.1:8545';
+        const rpcUrl = req.rpcUrl || 'https://rpc.quai.network/cyprus1';
         const timeoutMs = req.timeoutMs || 60_000;
         const provider = req.provider || (typeof window !== 'undefined' ? (window as any).ethereum : undefined);
 
@@ -122,7 +123,7 @@ export class Q0WalletPipeline {
                                 blockNumber: parseInt(json.result.blockNumber, 16),
                                 status: isSuccess ? 'success' : 'reverted'
                             },
-                            error: isSuccess ? undefined : 'Layer-0 swap transaction reverted on-chain.'
+                            error: isSuccess ? undefined : 'Quaiswap transaction reverted on-chain.'
                         };
                     }
                 }
