@@ -709,8 +709,18 @@ export default function App() {
                 <div className="lp-title">
                   <span>Q0 / WQUAI LP</span>
                 </div>
-                <div className="lp-badges">
+                <div className="lp-badges" style={{ alignItems: 'center', gap: '0.5rem' }}>
                   <span className="lp-badge lp-badge-address">{formatAddr(CONTRACTS.LP_WQUAI)}</span>
+                  <button 
+                    className="btn-primary" 
+                    style={{ padding: '0.3rem 0.65rem', fontSize: '0.75rem', minHeight: 'auto', borderRadius: '8px', cursor: 'pointer' }}
+                    onClick={() => {
+                      selectPoolTab('WQUAI');
+                      document.querySelector('.swap-card')?.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                  >
+                    <ArrowUpDown size={12} /> Swap WQUAI
+                  </button>
                 </div>
               </div>
               <div className="lp-reserves-row">
@@ -737,8 +747,18 @@ export default function App() {
                 <div className="lp-title">
                   <span>Q0 / BOSS LP</span>
                 </div>
-                <div className="lp-badges">
+                <div className="lp-badges" style={{ alignItems: 'center', gap: '0.5rem' }}>
                   <span className="lp-badge lp-badge-address">{formatAddr(CONTRACTS.LP_BOSS)}</span>
+                  <button 
+                    className="btn-primary" 
+                    style={{ padding: '0.3rem 0.65rem', fontSize: '0.75rem', minHeight: 'auto', borderRadius: '8px', cursor: 'pointer', background: 'linear-gradient(135deg, var(--accent-violet) 0%, #a855f7 100%)', color: '#fff !important' }}
+                    onClick={() => {
+                      selectPoolTab('BOSS');
+                      document.querySelector('.swap-card')?.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                  >
+                    <ArrowUpDown size={12} /> Swap Q0 / BOSS
+                  </button>
                 </div>
               </div>
               <div className="lp-reserves-row">
