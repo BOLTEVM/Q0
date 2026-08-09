@@ -494,17 +494,28 @@ export default function App() {
     setSwapTxHash(null);
 
     const provider = window.ethereum || window.pelagus;
-    const lpAddr = selectedPool === 'WQUAI' ? CONTRACTS.LP_WQUAI : CONTRACTS.LP_BOSS;
-    const targetToken = selectedPool === 'WQUAI' ? CONTRACTS.WQUAI : CONTRACTS.BOSS;
+    let lpAddr = CONTRACTS.LP_WQUAI;
+    let tokenInAddress = CONTRACTS.Q0;
+
+    if (selectedPool === 'WQUAI') {
+      lpAddr = CONTRACTS.LP_WQUAI;
+      tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.Q0 : CONTRACTS.WQUAI;
+    } else if (selectedPool === 'BOSS') {
+      lpAddr = CONTRACTS.LP_BOSS;
+      tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.Q0 : CONTRACTS.BOSS;
+    } else if (selectedPool === 'BOSS_QUAI') {
+      if (swapDirection === 'Q0_TO_TOKEN') {
+        lpAddr = CONTRACTS.LP_BOSS;
+        tokenInAddress = CONTRACTS.BOSS;
+      } else {
+        lpAddr = CONTRACTS.LP_WQUAI;
+        tokenInAddress = CONTRACTS.WQUAI;
+      }
+    }
 
     // Swap Details
     const amtInWei = BigInt(Math.floor(Number(swapAmountIn) * 1e18)).toString();
     const amtOutMinWei = BigInt(Math.floor(Number(minReceived) * 1e18)).toString();
-
-    let tokenInAddress = CONTRACTS.Q0;
-    if (swapDirection === 'TOKEN_TO_Q0') {
-      tokenInAddress = targetToken;
-    }
 
     try {
       // Step 1: Send Transfer transaction to LP
@@ -546,7 +557,7 @@ export default function App() {
       // Step 2: Trigger swap call on the LP
       let amt0Out = '0';
       let amt1Out = amtOutMinWei;
-      if (swapDirection === 'TOKEN_TO_Q0') {
+      if (tokenInAddress === CONTRACTS.WQUAI || tokenInAddress === CONTRACTS.BOSS) {
         amt0Out = amtOutMinWei;
         amt1Out = '0';
       }
@@ -622,6 +633,13 @@ export default function App() {
       return swapDirection === 'Q0_TO_TOKEN' ? 'WQUAI' : 'BOSS';
     }
     return swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0';
+  };
+
+  const getClaimTokenSymbol = () => {
+    if (claimDirection === 'Q0_TO_TOKEN') {
+      return claimPool === 'WQUAI' ? 'WQUAI' : 'BOSS';
+    }
+    return 'Q0';
   };
 
   // Loading Screen
@@ -1011,7 +1029,7 @@ export default function App() {
                   <TrendingUp size={16} /> Unclaimed Swap Pending
                 </h4>
                 <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-                  WQUAI/BOSS has been deposited (Tx: {formatAddr(pendingTransferTx || '')}). Click below to claim your estimated <strong>{formatUnits(claimMinReceived)} Q0</strong> tokens.
+                  Token deposit verified (Tx: {formatAddr(pendingTransferTx || '')}). Click below to claim your estimated <strong>{formatUnits(claimMinReceived)} {getClaimTokenSymbol()}</strong> tokens.
                 </p>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
                   <button 
