@@ -52,7 +52,7 @@ export default function App() {
   const [selectedPool, setSelectedPool] = useState<'WQUAI' | 'BOSS'>('WQUAI');
   const [swapAmountIn, setSwapAmountIn] = useState<string>('');
   const [swapAmountOut, setSwapAmountOut] = useState<string>('');
-  const [slippage, setSlippage] = useState<number>(0.5);
+  const [slippage, setSlippage] = useState<number>(1.0);
   const [priceImpact, setPriceImpact] = useState<string>('0.00%');
   const [minReceived, setMinReceived] = useState<string>('0');
   const [execPrice, setExecPrice] = useState<string>('0');
@@ -874,18 +874,41 @@ export default function App() {
                 <span className="swap-detail-label">Minimum Received</span>
                 <span className="swap-detail-value">{minReceived} {swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0'}</span>
               </div>
-              <div className="swap-detail-row">
+              <div className="swap-detail-row" style={{ alignItems: 'center' }}>
                 <span className="swap-detail-label">Slippage Tolerance</span>
                 <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                  {[0.1, 0.5, 1.0, 2.0].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      style={{
+                        background: slippage === preset ? 'rgba(0, 242, 254, 0.15)' : 'rgba(255, 255, 255, 0.04)',
+                        border: slippage === preset ? '1px solid var(--accent-neon)' : '1px solid var(--panel-border)',
+                        color: slippage === preset ? 'var(--accent-neon)' : 'var(--text-muted)',
+                        borderRadius: '4px',
+                        padding: '0.15rem 0.4rem',
+                        fontSize: '0.7rem',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onClick={() => {
+                        setSlippage(preset);
+                        setTimeout(() => handleAmountInChange(swapAmountIn), 10);
+                      }}
+                    >
+                      {preset}%
+                    </button>
+                  ))}
                   <input 
                     type="number" 
                     value={slippage} 
                     onChange={(e) => {
                       const val = parseFloat(e.target.value);
-                      setSlippage(isNaN(val) ? 0.5 : val);
+                      setSlippage(isNaN(val) ? 1.0 : val);
                       setTimeout(() => handleAmountInChange(swapAmountIn), 10);
                     }}
-                    style={{ background: 'transparent', border: '1px solid var(--panel-border)', borderRadius: '4px', width: '45px', color: 'inherit', fontSize: '0.75rem', textAlign: 'center', outline: 'none' }}
+                    style={{ background: 'transparent', border: '1px solid var(--panel-border)', borderRadius: '4px', width: '45px', color: 'inherit', fontSize: '0.75rem', textAlign: 'center', outline: 'none', marginLeft: '0.25rem' }}
                   />
                   <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>%</span>
                 </div>
