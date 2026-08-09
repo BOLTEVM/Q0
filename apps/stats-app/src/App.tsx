@@ -49,7 +49,7 @@ export default function App() {
   const [lpBoss, setLpBoss] = useState<LPReserves | null>(null);
   
   // Swap States
-  const [selectedPool, setSelectedPool] = useState<'WQUAI' | 'BOSS'>('WQUAI');
+  const [selectedPool, setSelectedPool] = useState<'WQUAI' | 'BOSS' | 'BOSS_QUAI'>('WQUAI');
   const [swapAmountIn, setSwapAmountIn] = useState<string>('');
   const [swapAmountOut, setSwapAmountOut] = useState<string>('');
   const [slippage, setSlippage] = useState<number>(1.0);
@@ -414,12 +414,43 @@ export default function App() {
       return;
     }
 
+    // Convert decimal input to Wei
+    const amtWei = BigInt(Math.floor(Number(val) * 1e18));
+
+    if (selectedPool === 'BOSS_QUAI') {
+      if (!lpBoss || !lpWquai) return;
+
+      if (swapDirection === 'Q0_TO_TOKEN') {
+        // Swapping BOSS -> WQUAI (routed via Q0)
+        const sim1 = simulateSwap(amtWei.toString(), lpBoss.reserve1, lpBoss.reserve0, 0);
+        if (sim1.amountOut === '0') return;
+
+        const sim2 = simulateSwap(sim1.amountOut, lpWquai.reserve0, lpWquai.reserve1, slippage);
+        setSwapAmountOut((Number(sim2.amountOut) / 1e18).toFixed(6));
+        const imp1 = parseFloat(sim1.priceImpact);
+        const imp2 = parseFloat(sim2.priceImpact);
+        setPriceImpact((imp1 + imp2).toFixed(2) + '%');
+        setMinReceived((Number(sim2.minimumReceived) / 1e18).toFixed(6));
+        setExecPrice(sim2.executionPrice);
+      } else {
+        // Swapping WQUAI -> BOSS (routed via Q0)
+        const sim1 = simulateSwap(amtWei.toString(), lpWquai.reserve1, lpWquai.reserve0, 0);
+        if (sim1.amountOut === '0') return;
+
+        const sim2 = simulateSwap(sim1.amountOut, lpBoss.reserve0, lpBoss.reserve1, slippage);
+        setSwapAmountOut((Number(sim2.amountOut) / 1e18).toFixed(6));
+        const imp1 = parseFloat(sim1.priceImpact);
+        const imp2 = parseFloat(sim2.priceImpact);
+        setPriceImpact((imp1 + imp2).toFixed(2) + '%');
+        setMinReceived((Number(sim2.minimumReceived) / 1e18).toFixed(6));
+        setExecPrice(sim2.executionPrice);
+      }
+      return;
+    }
+
     const currentLP = selectedPool === 'WQUAI' ? lpWquai : lpBoss;
     if (!currentLP) return;
 
-    // Convert decimal input to Wei
-    const amtWei = BigInt(Math.floor(Number(val) * 1e18));
-    
     // Determine which reserves are In vs Out
     let reserveIn = currentLP.reserve0; // Q0
     let reserveOut = currentLP.reserve1; // WQUAI or BOSS
@@ -563,7 +594,7 @@ export default function App() {
   };
 
   // Switch Pool Tabs
-  const selectPoolTab = (pool: 'WQUAI' | 'BOSS') => {
+  const selectPoolTab = (pool: 'WQUAI' | 'BOSS' | 'BOSS_QUAI') => {
     setSelectedPool(pool);
     setSwapAmountIn('');
     setSwapAmountOut('');
@@ -577,6 +608,20 @@ export default function App() {
   // Math helper
   const formatUnits = (valStr: string) => {
     return (Number(valStr) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  };
+
+  const getFromSymbol = () => {
+    if (selectedPool === 'BOSS_QUAI') {
+      return swapDirection === 'Q0_TO_TOKEN' ? 'BOSS' : 'WQUAI';
+    }
+    return swapDirection === 'Q0_TO_TOKEN' ? 'Q0' : selectedPool;
+  };
+
+  const getToSymbol = () => {
+    if (selectedPool === 'BOSS_QUAI') {
+      return swapDirection === 'Q0_TO_TOKEN' ? 'WQUAI' : 'BOSS';
+    }
+    return swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0';
   };
 
   // Loading Screen
@@ -742,7 +787,7 @@ export default function App() {
             </div>
 
             {/* Pool 2: Q0 / BOSS */}
-            <div>
+            <div style={{ marginBottom: '1.5rem', paddingBottom: '1.5rem', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
               <div className="lp-header">
                 <div className="lp-title">
                   <span>Q0 / BOSS LP</span>
@@ -778,6 +823,44 @@ export default function App() {
                 </span>
               </div>
             </div>
+
+            {/* Pool 3: BOSS / QUAI (Multi-Hop) */}
+            <div>
+              <div className="lp-header">
+                <div className="lp-title">
+                  <span>BOSS / QUAI (Routed)</span>
+                </div>
+                <div className="lp-badges" style={{ alignItems: 'center', gap: '0.5rem' }}>
+                  <span className="lp-badge lp-badge-address">Multi-Hop LP</span>
+                  <button 
+                    className="btn-primary" 
+                    style={{ padding: '0.3rem 0.65rem', fontSize: '0.75rem', minHeight: 'auto', borderRadius: '8px', cursor: 'pointer', background: 'linear-gradient(135deg, var(--accent-gold) 0%, #f59e0b 100%)', color: '#000 !important' }}
+                    onClick={() => {
+                      selectPoolTab('BOSS_QUAI');
+                      document.querySelector('.swap-card')?.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                  >
+                    <ArrowUpDown size={12} /> Swap BOSS / QUAI
+                  </button>
+                </div>
+              </div>
+              <div className="lp-reserves-row">
+                <div className="lp-reserve-box">
+                  <div className="lp-reserve-label">BOSS Reserve (LP 2)</div>
+                  <div className="lp-reserve-value">{lpBoss ? formatUnits(lpBoss.reserve1) : '0'}</div>
+                </div>
+                <div className="lp-reserve-box">
+                  <div className="lp-reserve-label">WQUAI Reserve (LP 1)</div>
+                  <div className="lp-reserve-value">{lpWquai ? formatUnits(lpWquai.reserve1) : '0'}</div>
+                </div>
+              </div>
+              <div className="lp-price-metric">
+                <span className="lp-price-label">Cross-Pair Rate</span>
+                <span className="lp-price-value">
+                  1 BOSS = {(wquaiPrice > 0 ? (bossPrice / wquaiPrice) : 0).toFixed(6)} WQUAI &nbsp;|&nbsp; 1 WQUAI = {(bossPrice > 0 ? (wquaiPrice / bossPrice) : 0).toFixed(2)} BOSS
+                </span>
+              </div>
+            </div>
           </div>
 
           {/* Swap Module Card */}
@@ -788,18 +871,24 @@ export default function App() {
             </div>
 
             {/* Selector Tabs */}
-            <div className="pool-selector-tabs">
+            <div className="pool-selector-tabs" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
               <button 
                 className={`pool-tab-btn ${selectedPool === 'WQUAI' ? 'active' : ''}`}
                 onClick={() => selectPoolTab('WQUAI')}
               >
-                Q0 / WQUAI Pool
+                Q0 / WQUAI
               </button>
               <button 
                 className={`pool-tab-btn ${selectedPool === 'BOSS' ? 'active' : ''}`}
                 onClick={() => selectPoolTab('BOSS')}
               >
-                Q0 / BOSS Pool
+                Q0 / BOSS
+              </button>
+              <button 
+                className={`pool-tab-btn ${selectedPool === 'BOSS_QUAI' ? 'active' : ''}`}
+                onClick={() => selectPoolTab('BOSS_QUAI')}
+              >
+                BOSS / QUAI
               </button>
             </div>
 
@@ -809,7 +898,7 @@ export default function App() {
                 <span>From</span>
                 {walletAddress && (
                   <span>
-                    Balance: {getBalanceForToken(swapDirection === 'Q0_TO_TOKEN' ? 'Q0' : selectedPool)}
+                    Balance: {getBalanceForToken(getFromSymbol())}
                   </span>
                 )}
               </div>
@@ -822,7 +911,7 @@ export default function App() {
                   onChange={(e) => handleAmountInChange(e.target.value)}
                 />
                 <div className="token-select-trigger">
-                  {swapDirection === 'Q0_TO_TOKEN' ? 'Q0' : selectedPool}
+                  {getFromSymbol()}
                 </div>
               </div>
             </div>
@@ -840,7 +929,7 @@ export default function App() {
                 <span>To (Estimated)</span>
                 {walletAddress && (
                   <span>
-                    Balance: {getBalanceForToken(swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0')}
+                    Balance: {getBalanceForToken(getToSymbol())}
                   </span>
                 )}
               </div>
@@ -853,7 +942,7 @@ export default function App() {
                   readOnly 
                 />
                 <div className="token-select-trigger">
-                  {swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0'}
+                  {getToSymbol()}
                 </div>
               </div>
             </div>
@@ -862,7 +951,7 @@ export default function App() {
             <div className="swap-details">
               <div className="swap-detail-row">
                 <span className="swap-detail-label">Execution Price</span>
-                <span className="swap-detail-value">{execPrice} {swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0'} per {swapDirection === 'Q0_TO_TOKEN' ? 'Q0' : selectedPool}</span>
+                <span className="swap-detail-value">{execPrice} {getToSymbol()} per {getFromSymbol()}</span>
               </div>
               <div className="swap-detail-row">
                 <span className="swap-detail-label">Price Impact</span>
@@ -872,7 +961,7 @@ export default function App() {
               </div>
               <div className="swap-detail-row">
                 <span className="swap-detail-label">Minimum Received</span>
-                <span className="swap-detail-value">{minReceived} {swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0'}</span>
+                <span className="swap-detail-value">{minReceived} {getToSymbol()}</span>
               </div>
               <div className="swap-detail-row" style={{ alignItems: 'center' }}>
                 <span className="swap-detail-label">Slippage Tolerance</span>
