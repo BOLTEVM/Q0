@@ -129,6 +129,14 @@ export default function App() {
     throw new Error("Transaction was not mined within 45 seconds.");
   };
 
+  const parseSwapError = (err: any): string => {
+    const msg = err.message || String(err);
+    if (msg.toLowerCase().includes("insufficient funds")) {
+      return "⚠️ Insufficient QUAI for Gas: You need more native QUAI in your wallet to cover the network transaction fee (estimated ~1.9 QUAI at current gas prices).";
+    }
+    return msg || "Transaction rejected or execution reverted.";
+  };
+
   const claimPendingSwap = async () => {
     if (!walletAddress || !pendingTransferTx) return;
     setSwapLoading(true);
@@ -160,7 +168,7 @@ export default function App() {
           from: walletAddress,
           to: lpAddr,
           data: swapData,
-          gas: '0x2bf20'
+          gas: '0x1d4c0'
         }]
       });
 
@@ -173,7 +181,7 @@ export default function App() {
 
     } catch (e: any) {
       console.error("Claim Transaction failed:", e);
-      setSwapError(e.message || "Transaction rejected or execution reverted.");
+      setSwapError(parseSwapError(e));
       setPendingSwapStep('READY_TO_CLAIM');
     } finally {
       setSwapLoading(false);
@@ -469,7 +477,7 @@ export default function App() {
           from: walletAddress,
           to: tokenInAddress,
           data: transferData,
-          gas: '0x186a0' // 100,000 gas limit
+          gas: '0xc350' // 50,000 gas limit
         }]
       });
 
@@ -512,7 +520,7 @@ export default function App() {
           from: walletAddress,
           to: lpAddr,
           data: swapData,
-          gas: '0x2bf20'
+          gas: '0x1d4c0' // 120,000 gas limit
         }]
       });
 
@@ -526,7 +534,7 @@ export default function App() {
 
     } catch (e: any) {
       console.error("Swap Transaction failed:", e);
-      setSwapError(e.message || "Transaction rejected or execution reverted.");
+      setSwapError(parseSwapError(e));
       // If we already successfully transferred tokens, stay in READY_TO_CLAIM step
       if (localStorage.getItem('pendingTransferTx')) {
         setPendingSwapStep('READY_TO_CLAIM');
