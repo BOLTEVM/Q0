@@ -31,6 +31,8 @@ export default function App() {
   // Wallet States
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [q0Balance, setQ0Balance] = useState<string>('0');
+  const [wquaiBalance, setWquaiBalance] = useState<string>('0');
+  const [bossBalance, setBossBalance] = useState<string>('0');
   const [quaiBalance, setQuaiBalance] = useState<string>('0');
   const [walletLoading, setWalletLoading] = useState<boolean>(false);
 
@@ -174,6 +176,8 @@ export default function App() {
 
       setSwapTxHash(swapTx);
       clearPendingSwap();
+      loadWalletBalances(walletAddress);
+      setTimeout(() => loadWalletBalances(walletAddress), 2000);
       setTimeout(() => {
         loadWalletBalances(walletAddress);
         fetchData(true);
@@ -341,16 +345,27 @@ export default function App() {
   // Load wallet balances if address is set
   const loadWalletBalances = useCallback(async (addr: string) => {
     try {
-      const [q0Bal, quaiBal] = await Promise.all([
+      const [q0Bal, wquaiBal, bossBal, quaiBal] = await Promise.all([
         getTokenBalance(CONTRACTS.Q0, addr),
+        getTokenBalance(CONTRACTS.WQUAI, addr),
+        getTokenBalance(CONTRACTS.BOSS, addr),
         getQuaiBalance(addr)
       ]);
       setQ0Balance((Number(q0Bal) / 1e18).toFixed(4));
+      setWquaiBalance((Number(wquaiBal) / 1e18).toFixed(4));
+      setBossBalance((Number(bossBal) / 1e18).toFixed(4));
       setQuaiBalance((Number(quaiBal) / 1e18).toFixed(4));
     } catch (e) {
       console.error("Error fetching wallet balance:", e);
     }
   }, []);
+
+  const getBalanceForToken = (symbol: string) => {
+    if (symbol === 'Q0') return q0Balance;
+    if (symbol === 'WQUAI') return wquaiBalance;
+    if (symbol === 'BOSS') return bossBalance;
+    return '0.0000';
+  };
 
   useEffect(() => {
     if (walletAddress) {
@@ -526,7 +541,8 @@ export default function App() {
 
       setSwapTxHash(swapTx);
       clearPendingSwap();
-
+      loadWalletBalances(walletAddress);
+      setTimeout(() => loadWalletBalances(walletAddress), 2000);
       setTimeout(() => {
         loadWalletBalances(walletAddress);
         fetchData(true);
@@ -598,10 +614,15 @@ export default function App() {
           </div>
 
           {walletAddress ? (
-            <button className="btn-primary btn-wallet-connected">
-              <Wallet size={16} />
-              <span>{formatAddr(walletAddress)}</span>
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span style={{ fontSize: '0.8rem', background: 'rgba(255,255,255,0.05)', padding: '0.4rem 0.75rem', borderRadius: '8px', border: '1px solid var(--panel-border)', color: 'var(--accent-gold)', fontWeight: 600 }}>
+                Gas: {quaiBalance} QUAI
+              </span>
+              <button className="btn-primary btn-wallet-connected">
+                <Wallet size={16} />
+                <span>{formatAddr(walletAddress)}</span>
+              </button>
+            </div>
           ) : (
             <button className="btn-primary" onClick={connectWallet} disabled={walletLoading}>
               <Wallet size={16} />
@@ -768,7 +789,7 @@ export default function App() {
                 <span>From</span>
                 {walletAddress && (
                   <span>
-                    Balance: {swapDirection === 'Q0_TO_TOKEN' ? q0Balance : (selectedPool === 'WQUAI' ? quaiBalance : '0.00')}
+                    Balance: {getBalanceForToken(swapDirection === 'Q0_TO_TOKEN' ? 'Q0' : selectedPool)}
                   </span>
                 )}
               </div>
@@ -799,7 +820,7 @@ export default function App() {
                 <span>To (Estimated)</span>
                 {walletAddress && (
                   <span>
-                    Balance: {swapDirection === 'Q0_TO_TOKEN' ? (selectedPool === 'WQUAI' ? quaiBalance : '0.00') : q0Balance}
+                    Balance: {getBalanceForToken(swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0')}
                   </span>
                 )}
               </div>
