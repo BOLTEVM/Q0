@@ -148,6 +148,32 @@ export default function App() {
       const provider = window.ethereum || window.pelagus;
       const lpAddr = claimPool === 'WQUAI' ? CONTRACTS.LP_WQUAI : CONTRACTS.LP_BOSS;
 
+      // On-Chain Excess Reserve Pre-Validation
+      const cleanLP = lpAddr.replace('0x', '').padStart(64, '0');
+      const tokenAddress = claimDirection === 'Q0_TO_TOKEN' ? CONTRACTS.Q0 : (claimPool === 'WQUAI' ? CONTRACTS.WQUAI : CONTRACTS.BOSS);
+      const balData = '0x70a08231' + cleanLP;
+      
+      const [balHex, resHex] = await Promise.all([
+        quaiRpcCall('quai_call', [{ to: tokenAddress, data: balData }, 'latest']),
+        quaiRpcCall('quai_call', [{ to: lpAddr, data: '0x0902f1ac' }, 'latest'])
+      ]);
+
+      if (balHex && resHex && resHex.length >= 130) {
+        const tokenBal = BigInt(balHex);
+        const rawRes = resHex.replace('0x', '');
+        const reserve0 = BigInt('0x' + rawRes.slice(0, 64));
+        const reserve1 = BigInt('0x' + rawRes.slice(64, 128));
+        const trackedReserve = claimDirection === 'Q0_TO_TOKEN' ? reserve0 : reserve1;
+        
+        const excess = tokenBal - trackedReserve;
+        if (excess <= 0n) {
+          clearPendingSwap();
+          setSwapError("Notice: This swap deposit has already been processed on-chain! Your token balances have been updated.");
+          loadWalletBalances(walletAddress);
+          return;
+        }
+      }
+
       let amt0Out = '0';
       let amt1Out = claimMinReceived;
       if (claimDirection === 'TOKEN_TO_Q0') {
@@ -175,6 +201,7 @@ export default function App() {
       });
 
       setSwapTxHash(swapTx);
+      await waitForTransaction(swapTx);
       clearPendingSwap();
       loadWalletBalances(walletAddress);
       setTimeout(() => loadWalletBalances(walletAddress), 2000);
@@ -239,6 +266,31 @@ export default function App() {
         direction = 'Q0_TO_TOKEN';
       } else {
         direction = 'TOKEN_TO_Q0';
+      }
+
+      const lpAddr = poolType === 'WQUAI' ? CONTRACTS.LP_WQUAI : CONTRACTS.LP_BOSS;
+      const cleanLP = lpAddr.replace('0x', '').padStart(64, '0');
+      const balData = '0x70a08231' + cleanLP;
+      
+      const [balHex, resHex] = await Promise.all([
+        quaiRpcCall('quai_call', [{ to: tokenAddress, data: balData }, 'latest']),
+        quaiRpcCall('quai_call', [{ to: lpAddr, data: '0x0902f1ac' }, 'latest'])
+      ]);
+
+      if (balHex && resHex && resHex.length >= 130) {
+        const tokenBal = BigInt(balHex);
+        const rawRes = resHex.replace('0x', '');
+        const reserve0 = BigInt('0x' + rawRes.slice(0, 64));
+        const reserve1 = BigInt('0x' + rawRes.slice(64, 128));
+        const trackedReserve = direction === 'Q0_TO_TOKEN' ? reserve0 : reserve1;
+        const excess = tokenBal - trackedReserve;
+        
+        if (excess <= 0n) {
+          setRecoveryError("Notice: This swap deposit has already been processed on-chain! Your wallet balances are up-to-date.");
+          clearPendingSwap();
+          if (walletAddress) loadWalletBalances(walletAddress);
+          return;
+        }
       }
 
       const currentLP = poolType === 'WQUAI' ? lpWquai : lpBoss;
