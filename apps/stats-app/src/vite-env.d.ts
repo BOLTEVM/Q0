@@ -3,4 +3,5 @@
 interface Window {
   ethereum?: any;
   pelagus?: any;
+  quai?: any;
 }

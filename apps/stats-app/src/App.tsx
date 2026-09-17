@@ -11,21 +11,31 @@ import {
   Users, 
   Award
 } from 'lucide-react';
-import { 
-  CONTRACTS, 
-  getTokenMetadata, 
-  getLPReserves, 
-  getLatestBlockNumber, 
-  getTokenTransfers, 
-  getHolderCount, 
+import {
+  CONTRACTS,
+  getTokenMetadata,
+  getLPReserves,
+  getLatestBlockNumber,
   simulateSwap,
   getTokenBalance,
   getQuaiBalance,
   quaiRpcCall,
+  getTokenDetailV2,
+  getQuainanceTVL,
+  findQuainancePools,
   TokenMetadata,
   LPReserves,
-  TransferEvent
+  TokenDetailV2,
+  TokenTransferV2,
+  QuainanceTVL
 } from 'quai-service';
+import { 
+  getQuaiProvider, 
+  getCyprus1Address, 
+  requestWalletAccounts, 
+  getAuthorizedAccounts, 
+  sendWalletTransaction 
+} from './providerUtils';
 
 export default function App() {
   // Wallet States
@@ -34,6 +44,8 @@ export default function App() {
   const [wquaiBalance, setWquaiBalance] = useState<string>('0');
   const [bossBalance, setBossBalance] = useState<string>('0');
   const [quaiBalance, setQuaiBalance] = useState<string>('0');
+  const [laptopBalance, setLaptopBalance] = useState<string>('0');
+  const [qgirlBalance, setQgirlBalance] = useState<string>('0');
   const [walletLoading, setWalletLoading] = useState<boolean>(false);
 
   // General Chain & Contract States
@@ -42,14 +54,20 @@ export default function App() {
   const [q0Meta, setQ0Meta] = useState<TokenMetadata | null>(null);
   const [holderCount, setHolderCount] = useState<number>(0);
   const [latestBlock, setLatestBlock] = useState<number>(0);
-  const [transfers, setTransfers] = useState<TransferEvent[]>([]);
+  const [transfers, setTransfers] = useState<TokenTransferV2[]>([]);
+  const [tokenDetail, setTokenDetail] = useState<TokenDetailV2 | null>(null);
 
   // LP Pool States
   const [lpWquai, setLpWquai] = useState<LPReserves | null>(null);
   const [lpBoss, setLpBoss] = useState<LPReserves | null>(null);
+  const [lpLaptopWquai, setLpLaptopWquai] = useState<LPReserves | null>(null);
+  const [lpLaptopQgirl, setLpLaptopQgirl] = useState<LPReserves | null>(null);
+
+  // Quainance DEX States (new explorer.qu.ai API - https://explorer.qu.ai/api-docs)
+  const [quainanceTvl, setQuainanceTvl] = useState<QuainanceTVL | null>(null);
   
   // Swap States
-  const [selectedPool, setSelectedPool] = useState<'WQUAI' | 'BOSS' | 'BOSS_QUAI'>('WQUAI');
+  const [selectedPool, setSelectedPool] = useState<'WQUAI' | 'BOSS' | 'BOSS_QUAI' | 'LAPTOP_WQUAI' | 'LAPTOP_QGIRL'>('WQUAI');
   const [swapAmountIn, setSwapAmountIn] = useState<string>('');
   const [swapAmountOut, setSwapAmountOut] = useState<string>('');
   const [slippage, setSlippage] = useState<number>(1.0);
@@ -65,7 +83,7 @@ export default function App() {
   const [pendingTransferTx, setPendingTransferTx] = useState<string | null>(null);
   const [pendingSwapStep, setPendingSwapStep] = useState<'IDLE' | 'WAITING_FOR_CONFIRMATION' | 'READY_TO_CLAIM' | 'CLAIMING'>('IDLE');
   const [claimMinReceived, setClaimMinReceived] = useState<string>('0');
-  const [claimPool, setClaimPool] = useState<'WQUAI' | 'BOSS'>('WQUAI');
+  const [claimPool, setClaimPool] = useState<'WQUAI' | 'BOSS' | 'LAPTOP_WQUAI' | 'LAPTOP_QGIRL'>('WQUAI');
   const [claimDirection, setClaimDirection] = useState<'Q0_TO_TOKEN' | 'TOKEN_TO_Q0'>('TOKEN_TO_Q0');
   const [manualTxHash, setManualTxHash] = useState<string>('');
   const [showRecoveryBox, setShowRecoveryBox] = useState<boolean>(false);
@@ -145,44 +163,79 @@ export default function App() {
     setSwapError(null);
     setPendingSwapStep('CLAIMING');
     try {
-      const provider = window.ethereum || window.pelagus;
-      const lpAddr = claimPool === 'WQUAI' ? CONTRACTS.LP_WQUAI : CONTRACTS.LP_BOSS;
+      const provider = getQuaiProvider();
+      if (!provider) {
+        throw new Error("Pelagus / Quai provider not found.");
+      }
+      let lpAddr = CONTRACTS.LP_WQUAI;
+      let token0Addr = CONTRACTS.Q0;
+      let token1Addr = CONTRACTS.WQUAI;
 
-      // On-Chain Excess Reserve Pre-Validation
+      if (claimPool === 'BOSS') {
+        lpAddr = CONTRACTS.LP_BOSS;
+        token0Addr = CONTRACTS.Q0;
+        token1Addr = CONTRACTS.BOSS;
+      } else if (claimPool === 'LAPTOP_WQUAI') {
+        lpAddr = CONTRACTS.LP_LAPTOP_WQUAI;
+        token0Addr = CONTRACTS.LAPTOP;
+        token1Addr = CONTRACTS.WQUAI;
+      } else if (claimPool === 'LAPTOP_QGIRL') {
+        lpAddr = CONTRACTS.LP_LAPTOP_QGIRL;
+        token0Addr = CONTRACTS.LAPTOP;
+        token1Addr = CONTRACTS.QGIRL;
+      }
+
+      // On-Chain Excess Reserve Pre-Validation & Dynamic Calculation
       const cleanLP = lpAddr.replace('0x', '').padStart(64, '0');
-      const tokenAddress = claimDirection === 'Q0_TO_TOKEN' ? CONTRACTS.Q0 : (claimPool === 'WQUAI' ? CONTRACTS.WQUAI : CONTRACTS.BOSS);
       const balData = '0x70a08231' + cleanLP;
       
-      const [balHex, resHex] = await Promise.all([
-        quaiRpcCall('quai_call', [{ to: tokenAddress, data: balData }, 'latest']),
+      const [bal0Hex, bal1Hex, resHex] = await Promise.all([
+        quaiRpcCall('quai_call', [{ to: token0Addr, data: balData }, 'latest']),
+        quaiRpcCall('quai_call', [{ to: token1Addr, data: balData }, 'latest']),
         quaiRpcCall('quai_call', [{ to: lpAddr, data: '0x0902f1ac' }, 'latest'])
       ]);
 
-      if (balHex && resHex && resHex.length >= 130) {
-        const tokenBal = BigInt(balHex);
-        const rawRes = resHex.replace('0x', '');
-        const reserve0 = BigInt('0x' + rawRes.slice(0, 64));
-        const reserve1 = BigInt('0x' + rawRes.slice(64, 128));
-        const trackedReserve = claimDirection === 'Q0_TO_TOKEN' ? reserve0 : reserve1;
-        
-        const excess = tokenBal - trackedReserve;
-        if (excess <= 0n) {
-          clearPendingSwap();
-          setSwapError("Notice: This swap deposit has already been processed on-chain! Your token balances have been updated.");
-          loadWalletBalances(walletAddress);
-          return;
-        }
+      if (!bal0Hex || !bal1Hex || !resHex || resHex.length < 130) {
+        throw new Error("Failed to fetch pool reserves and balances.");
       }
 
-      let amt0Out = '0';
-      let amt1Out = claimMinReceived;
-      if (claimDirection === 'TOKEN_TO_Q0') {
-        amt0Out = claimMinReceived;
-        amt1Out = '0';
+      const bal0 = BigInt(bal0Hex);
+      const bal1 = BigInt(bal1Hex);
+      const rawRes = resHex.replace('0x', '');
+      const reserve0 = BigInt('0x' + rawRes.slice(0, 64));
+      const reserve1 = BigInt('0x' + rawRes.slice(64, 128));
+
+      const excess0 = bal0 - reserve0;
+      const excess1 = bal1 - reserve1;
+
+      if (excess0 <= 0n && excess1 <= 0n) {
+        clearPendingSwap();
+        setSwapError("Notice: This swap deposit has already been processed on-chain! Your token balances have been updated.");
+        loadWalletBalances(walletAddress);
+        return;
       }
 
-      const cleanAmt0 = BigInt(amt0Out).toString(16).padStart(64, '0');
-      const cleanAmt1 = BigInt(amt1Out).toString(16).padStart(64, '0');
+      // Automatically determine swap direction and exact output from on-chain excess:
+      let amt0Out = 0n;
+      let amt1Out = 0n;
+
+      if (excess1 > 0n) {
+        // Token1 (WQUAI/BOSS) was deposited -> Token0 (Q0) is being claimed
+        // Uniswap V2 constant product formula with 0.3% fee:
+        const amountInWithFee = excess1 * 997n;
+        amt0Out = (amountInWithFee * reserve0) / (reserve1 * 1000n + amountInWithFee);
+        amt1Out = 0n;
+        setClaimDirection('TOKEN_TO_Q0');
+      } else if (excess0 > 0n) {
+        // Token0 (Q0) was deposited -> Token1 (WQUAI/BOSS) is being claimed
+        const amountInWithFee = excess0 * 997n;
+        amt1Out = (amountInWithFee * reserve1) / (reserve0 * 1000n + amountInWithFee);
+        amt0Out = 0n;
+        setClaimDirection('Q0_TO_TOKEN');
+      }
+
+      const cleanAmt0 = amt0Out.toString(16).padStart(64, '0');
+      const cleanAmt1 = amt1Out.toString(16).padStart(64, '0');
       const cleanUser = walletAddress.replace('0x', '').padStart(64, '0');
       const dataOffset = '0000000000000000000000000000000000000000000000000000000000000080';
       const dataLen = '0000000000000000000000000000000000000000000000000000000000000000';
@@ -190,14 +243,11 @@ export default function App() {
       const swapData = '0x022c0d9f' + cleanAmt0 + cleanAmt1 + cleanUser + dataOffset + dataLen;
 
       console.log("Sending Swap transaction (Claim mode)...");
-      const swapTx = await provider.request({
-        method: 'eth_sendTransaction',
-        params: [{
-          from: walletAddress,
-          to: lpAddr,
-          data: swapData,
-          gas: '0x1d4c0'
-        }]
+      const swapTx = await sendWalletTransaction(provider, {
+        from: walletAddress,
+        to: lpAddr,
+        data: swapData,
+        gas: '0x30d40' // 200,000 gas limit
       });
 
       setSwapTxHash(swapTx);
@@ -277,33 +327,30 @@ export default function App() {
         quaiRpcCall('quai_call', [{ to: lpAddr, data: '0x0902f1ac' }, 'latest'])
       ]);
 
-      if (balHex && resHex && resHex.length >= 130) {
-        const tokenBal = BigInt(balHex);
-        const rawRes = resHex.replace('0x', '');
-        const reserve0 = BigInt('0x' + rawRes.slice(0, 64));
-        const reserve1 = BigInt('0x' + rawRes.slice(64, 128));
-        const trackedReserve = direction === 'Q0_TO_TOKEN' ? reserve0 : reserve1;
-        const excess = tokenBal - trackedReserve;
-        
-        if (excess <= 0n) {
-          setRecoveryError("Notice: This swap deposit has already been processed on-chain! Your wallet balances are up-to-date.");
-          clearPendingSwap();
-          if (walletAddress) loadWalletBalances(walletAddress);
-          return;
-        }
-      }
-
-      const currentLP = poolType === 'WQUAI' ? lpWquai : lpBoss;
-      if (!currentLP) {
+      if (!balHex || !resHex || resHex.length < 130) {
         setRecoveryError("Failed to fetch current LP reserves.");
         return;
       }
 
-      let reserveIn = currentLP.reserve0;
-      let reserveOut = currentLP.reserve1;
+      const tokenBal = BigInt(balHex);
+      const rawRes = resHex.replace('0x', '');
+      const reserve0 = BigInt('0x' + rawRes.slice(0, 64));
+      const reserve1 = BigInt('0x' + rawRes.slice(64, 128));
+      const trackedReserve = direction === 'Q0_TO_TOKEN' ? reserve0 : reserve1;
+      const excess = tokenBal - trackedReserve;
+      
+      if (excess <= 0n) {
+        setRecoveryError("Notice: This swap deposit has already been processed on-chain! Your wallet balances are up-to-date.");
+        clearPendingSwap();
+        if (walletAddress) loadWalletBalances(walletAddress);
+        return;
+      }
+
+      let reserveIn = reserve0.toString();
+      let reserveOut = reserve1.toString();
       if (direction === 'TOKEN_TO_Q0') {
-        reserveIn = currentLP.reserve1;
-        reserveOut = currentLP.reserve0;
+        reserveIn = reserve1.toString();
+        reserveOut = reserve0.toString();
       }
 
       const sim = simulateSwap(amtInWei, reserveIn, reserveOut, 1.0);
@@ -334,52 +381,47 @@ export default function App() {
     else setLoading(true);
 
     try {
-      // 1. Get Token Metadata, reserves, block number
-      const [meta, wquaiRes, bossRes, blockNum, listTransfers, holders] = await Promise.all([
+      // 1. Get Token Metadata, reserves, block number, and rich token detail from
+      // the new explorer.qu.ai Explorer API (holders, transfers, USD market stats).
+      // Quainance TVL is fetched with on-chain reserve fallback.
+      const [meta, wquaiRes, bossRes, laptopWquaiRes, laptopQgirlRes, blockNum, detail] = await Promise.all([
         getTokenMetadata(CONTRACTS.Q0),
         getLPReserves(CONTRACTS.LP_WQUAI),
         getLPReserves(CONTRACTS.LP_BOSS),
+        getLPReserves(CONTRACTS.LP_LAPTOP_WQUAI),
+        getLPReserves(CONTRACTS.LP_LAPTOP_QGIRL),
         getLatestBlockNumber(),
-        getTokenTransfers(CONTRACTS.Q0, '/api-explorer'),
-        getHolderCount(CONTRACTS.Q0, '/api-explorer')
+        getTokenDetailV2(CONTRACTS.Q0)
       ]);
 
       setQ0Meta(meta);
       setLpWquai(wquaiRes);
       setLpBoss(bossRes);
+      setLpLaptopWquai(laptopWquaiRes);
+      setLpLaptopQgirl(laptopQgirlRes);
       setLatestBlock(blockNum);
-      setTransfers(listTransfers);
-      setHolderCount(holders || 34); // Fallback to 34 holders if API fails
+      setTokenDetail(detail);
+      setTransfers(detail.transfers);
+      setHolderCount(detail.token.holder_count || 34); // Fallback to 34 holders if API fails
 
-      // Parse top holders from transfer list dynamically
-      const balances: { [key: string]: bigint } = {};
-      listTransfers.forEach(tx => {
-        const from = tx.from.toLowerCase();
-        const to = tx.to.toLowerCase();
-        const val = BigInt(tx.value);
-        if (from && from !== '0x0000000000000000000000000000000000000000') {
-          balances[from] = (balances[from] || 0n) - val;
-        }
-        if (to) {
-          balances[to] = (balances[to] || 0n) + val;
-        }
-      });
-
-      // Filter out address 0x01 (burn/system) and sort
-      const sorted = Object.entries(balances)
-        .filter(([addr, bal]) => bal > 0n && addr !== '0x0000000000000000000000000000000000000000')
-        .sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : 0))
-        .slice(0, 8);
-
-      const parsedHolders = sorted.map(([addr, bal]) => {
-        const pct = ((Number(bal) / 1e27) * 100).toFixed(2); // 1e27 is total supply (1B * 1e18)
-        return {
-          address: addr,
-          balance: (Number(bal) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 0 }),
-          pct: pct + '%'
-        };
-      });
+      // Top holders come pre-ranked with percentage directly from the explorer
+      const parsedHolders = detail.holders
+        .filter(h => h.address.toLowerCase() !== '0x0000000000000000000000000000000000000000')
+        .slice(0, 8)
+        .map(h => ({
+          address: h.address,
+          balance: (Number(h.balance) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 0 }),
+          pct: h.percentage.toFixed(2) + '%'
+        }));
       setTopHolders(parsedHolders);
+
+      // Quainance DEX pools (LAPTOP pairs + everything else indexed)
+      try {
+        const tvl = await getQuainanceTVL(1, '/api-quai-v2');
+        setQuainanceTvl(tvl);
+      } catch (tvlErr) {
+        console.error("Error loading Quainance TVL data:", tvlErr);
+      }
 
     } catch (e) {
       console.error("Error loading data from Quai:", e);
@@ -397,16 +439,20 @@ export default function App() {
   // Load wallet balances if address is set
   const loadWalletBalances = useCallback(async (addr: string) => {
     try {
-      const [q0Bal, wquaiBal, bossBal, quaiBal] = await Promise.all([
+      const [q0Bal, wquaiBal, bossBal, quaiBal, laptopBal, qgirlBal] = await Promise.all([
         getTokenBalance(CONTRACTS.Q0, addr),
         getTokenBalance(CONTRACTS.WQUAI, addr),
         getTokenBalance(CONTRACTS.BOSS, addr),
-        getQuaiBalance(addr)
+        getQuaiBalance(addr),
+        getTokenBalance(CONTRACTS.LAPTOP, addr),
+        getTokenBalance(CONTRACTS.QGIRL, addr)
       ]);
       setQ0Balance((Number(q0Bal) / 1e18).toFixed(4));
       setWquaiBalance((Number(wquaiBal) / 1e18).toFixed(4));
       setBossBalance((Number(bossBal) / 1e18).toFixed(4));
       setQuaiBalance((Number(quaiBal) / 1e18).toFixed(4));
+      setLaptopBalance((Number(laptopBal) / 1e18).toFixed(4));
+      setQgirlBalance((Number(qgirlBal) / 1e18).toFixed(4));
     } catch (e) {
       console.error("Error fetching wallet balance:", e);
     }
@@ -416,6 +462,8 @@ export default function App() {
     if (symbol === 'Q0') return q0Balance;
     if (symbol === 'WQUAI') return wquaiBalance;
     if (symbol === 'BOSS') return bossBalance;
+    if (symbol === 'LAPTOP') return laptopBalance;
+    if (symbol === 'QGIRL') return qgirlBalance;
     return '0.0000';
   };
 
@@ -425,28 +473,75 @@ export default function App() {
     }
   }, [walletAddress, loadWalletBalances]);
 
+  // Check authorized accounts silently on mount (auto-connect)
+  useEffect(() => {
+    let isMounted = true;
+    const checkSilentConnect = async () => {
+      const provider = getQuaiProvider();
+      if (!provider) return;
+      try {
+        const accounts = await getAuthorizedAccounts(provider);
+        if (isMounted && accounts && accounts.length > 0) {
+          const cyprus1Addr = getCyprus1Address(accounts);
+          if (cyprus1Addr) {
+            setWalletAddress(cyprus1Addr);
+          }
+        }
+      } catch (err) {
+        console.warn("Silent account check failed:", err);
+      }
+    };
+    checkSilentConnect();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Setup accountsChanged listener with cleanup
+  useEffect(() => {
+    const provider = getQuaiProvider();
+    if (!provider || typeof provider.on !== 'function') return;
+
+    const handleAccountsChanged = (newAccounts: string[]) => {
+      if (newAccounts && newAccounts.length > 0) {
+        const cyprus1Addr = getCyprus1Address(newAccounts);
+        setWalletAddress(cyprus1Addr);
+      } else {
+        setWalletAddress(null);
+      }
+    };
+
+    provider.on('accountsChanged', handleAccountsChanged);
+    return () => {
+      if (typeof provider.removeListener === 'function') {
+        provider.removeListener('accountsChanged', handleAccountsChanged);
+      }
+    };
+  }, []);
+
   // Wallet connection helper
   const connectWallet = async () => {
-    const provider = window.ethereum || window.pelagus;
+    const provider = getQuaiProvider();
     if (!provider) {
-      alert("Pelagus Wallet or MetaMask not found. Please install the Pelagus wallet extension to interact with Quai Network.");
+      alert("Pelagus Wallet not found. Please install the Pelagus extension from https://pelaguswallet.io to interact with Quai Network.");
       return;
     }
 
     setWalletLoading(true);
     try {
-      const accounts = await provider.request({ method: 'eth_requestAccounts' });
+      const accounts = await requestWalletAccounts(provider);
       if (accounts && accounts.length > 0) {
-        setWalletAddress(accounts[0]);
-        // Setup listener
-        provider.on('accountsChanged', (newAccounts: string[]) => {
-          if (newAccounts.length > 0) setWalletAddress(newAccounts[0]);
-          else setWalletAddress(null);
-        });
+        const selected = getCyprus1Address(accounts);
+        if (selected) {
+          if (!selected.toLowerCase().startsWith('0x00')) {
+            alert(`Warning: The connected account (${selected}) does not reside on the Cyprus-1 shard (address must begin with 0x00). Please select a Cyprus-1 account in Pelagus.`);
+          }
+          setWalletAddress(selected);
+        }
       }
     } catch (e: any) {
       console.error("Wallet connection failed:", e);
-      alert("Failed to connect wallet: " + e.message);
+      alert("Failed to connect wallet: " + (e.message || "Unknown error"));
     } finally {
       setWalletLoading(false);
     }
@@ -500,12 +595,16 @@ export default function App() {
       return;
     }
 
-    const currentLP = selectedPool === 'WQUAI' ? lpWquai : lpBoss;
+    let currentLP = lpWquai;
+    if (selectedPool === 'BOSS') currentLP = lpBoss;
+    else if (selectedPool === 'LAPTOP_WQUAI') currentLP = lpLaptopWquai;
+    else if (selectedPool === 'LAPTOP_QGIRL') currentLP = lpLaptopQgirl;
+
     if (!currentLP) return;
 
     // Determine which reserves are In vs Out
-    let reserveIn = currentLP.reserve0; // Q0
-    let reserveOut = currentLP.reserve1; // WQUAI or BOSS
+    let reserveIn = currentLP.reserve0; // Token0 (Q0 or LAPTOP)
+    let reserveOut = currentLP.reserve1; // Token1 (WQUAI, BOSS, or QGIRL)
     
     if (swapDirection === 'TOKEN_TO_Q0') {
       reserveIn = currentLP.reserve1;
@@ -545,7 +644,12 @@ export default function App() {
     setSwapError(null);
     setSwapTxHash(null);
 
-    const provider = window.ethereum || window.pelagus;
+    const provider = getQuaiProvider();
+    if (!provider) {
+      setSwapError("Pelagus / Quai provider not found. Please connect your wallet.");
+      setSwapLoading(false);
+      return;
+    }
     let lpAddr = CONTRACTS.LP_WQUAI;
     let tokenInAddress = CONTRACTS.Q0;
 
@@ -555,6 +659,12 @@ export default function App() {
     } else if (selectedPool === 'BOSS') {
       lpAddr = CONTRACTS.LP_BOSS;
       tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.Q0 : CONTRACTS.BOSS;
+    } else if (selectedPool === 'LAPTOP_WQUAI') {
+      lpAddr = CONTRACTS.LP_LAPTOP_WQUAI;
+      tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.LAPTOP : CONTRACTS.WQUAI;
+    } else if (selectedPool === 'LAPTOP_QGIRL') {
+      lpAddr = CONTRACTS.LP_LAPTOP_QGIRL;
+      tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.LAPTOP : CONTRACTS.QGIRL;
     } else if (selectedPool === 'BOSS_QUAI') {
       if (swapDirection === 'Q0_TO_TOKEN') {
         lpAddr = CONTRACTS.LP_BOSS;
@@ -580,14 +690,11 @@ export default function App() {
       const transferData = '0xa9059cbb' + cleanLPAddr + cleanAmt;
 
       console.log("Sending Transfer transaction to LP...");
-      const transferTx = await provider.request({
-        method: 'eth_sendTransaction',
-        params: [{
-          from: walletAddress,
-          to: tokenInAddress,
-          data: transferData,
-          gas: '0xc350' // 50,000 gas limit
-        }]
+      const transferTx = await sendWalletTransaction(provider, {
+        from: walletAddress,
+        to: tokenInAddress,
+        data: transferData,
+        gas: '0xc350' // 50,000 gas limit
       });
 
       console.log("Transfer TX Hash:", transferTx);
@@ -601,46 +708,13 @@ export default function App() {
         swapDirection
       );
 
-      // Wait for receipt confirmation
-      console.log("Waiting for transfer transaction to be mined...");
+      // Step 2: Call swap() on LP pair contract
+      console.log("Waiting for Transfer to confirm before claiming...");
       await waitForTransaction(transferTx);
-      console.log("Transfer confirmed! Initiating swap call...");
+      setPendingSwapStep('READY_TO_CLAIM');
 
-      // Step 2: Trigger swap call on the LP
-      let amt0Out = '0';
-      let amt1Out = amtOutMinWei;
-      if (tokenInAddress === CONTRACTS.WQUAI || tokenInAddress === CONTRACTS.BOSS) {
-        amt0Out = amtOutMinWei;
-        amt1Out = '0';
-      }
-
-      const cleanAmt0 = BigInt(amt0Out).toString(16).padStart(64, '0');
-      const cleanAmt1 = BigInt(amt1Out).toString(16).padStart(64, '0');
-      const cleanUser = walletAddress.replace('0x', '').padStart(64, '0');
-      const dataOffset = '0000000000000000000000000000000000000000000000000000000000000080';
-      const dataLen = '0000000000000000000000000000000000000000000000000000000000000000';
-      
-      const swapData = '0x022c0d9f' + cleanAmt0 + cleanAmt1 + cleanUser + dataOffset + dataLen;
-
-      console.log("Sending Swap transaction...");
-      const swapTx = await provider.request({
-        method: 'eth_sendTransaction',
-        params: [{
-          from: walletAddress,
-          to: lpAddr,
-          data: swapData,
-          gas: '0x1d4c0' // 120,000 gas limit
-        }]
-      });
-
-      setSwapTxHash(swapTx);
-      clearPendingSwap();
-      loadWalletBalances(walletAddress);
-      setTimeout(() => loadWalletBalances(walletAddress), 2000);
-      setTimeout(() => {
-        loadWalletBalances(walletAddress);
-        fetchData(true);
-      }, 5000);
+      // Fetch dynamic balance to compute exact excess
+      await claimPendingSwap();
 
     } catch (e: any) {
       console.error("Swap Transaction failed:", e);
@@ -657,7 +731,7 @@ export default function App() {
   };
 
   // Switch Pool Tabs
-  const selectPoolTab = (pool: 'WQUAI' | 'BOSS' | 'BOSS_QUAI') => {
+  const selectPoolTab = (pool: 'WQUAI' | 'BOSS' | 'BOSS_QUAI' | 'LAPTOP_WQUAI' | 'LAPTOP_QGIRL') => {
     setSelectedPool(pool);
     setSwapAmountIn('');
     setSwapAmountOut('');
@@ -677,6 +751,12 @@ export default function App() {
     if (selectedPool === 'BOSS_QUAI') {
       return swapDirection === 'Q0_TO_TOKEN' ? 'BOSS' : 'WQUAI';
     }
+    if (selectedPool === 'LAPTOP_WQUAI') {
+      return swapDirection === 'Q0_TO_TOKEN' ? 'LAPTOP' : 'WQUAI';
+    }
+    if (selectedPool === 'LAPTOP_QGIRL') {
+      return swapDirection === 'Q0_TO_TOKEN' ? 'LAPTOP' : 'QGIRL';
+    }
     return swapDirection === 'Q0_TO_TOKEN' ? 'Q0' : selectedPool;
   };
 
@@ -684,10 +764,22 @@ export default function App() {
     if (selectedPool === 'BOSS_QUAI') {
       return swapDirection === 'Q0_TO_TOKEN' ? 'WQUAI' : 'BOSS';
     }
+    if (selectedPool === 'LAPTOP_WQUAI') {
+      return swapDirection === 'Q0_TO_TOKEN' ? 'WQUAI' : 'LAPTOP';
+    }
+    if (selectedPool === 'LAPTOP_QGIRL') {
+      return swapDirection === 'Q0_TO_TOKEN' ? 'QGIRL' : 'LAPTOP';
+    }
     return swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0';
   };
 
   const getClaimTokenSymbol = () => {
+    if (claimPool === 'LAPTOP_WQUAI') {
+      return claimDirection === 'Q0_TO_TOKEN' ? 'WQUAI' : 'LAPTOP';
+    }
+    if (claimPool === 'LAPTOP_QGIRL') {
+      return claimDirection === 'Q0_TO_TOKEN' ? 'QGIRL' : 'LAPTOP';
+    }
     if (claimDirection === 'Q0_TO_TOKEN') {
       return claimPool === 'WQUAI' ? 'WQUAI' : 'BOSS';
     }
@@ -803,6 +895,21 @@ export default function App() {
           <div>
             <div className="stat-value">#{latestBlock}</div>
             <div className="stat-sub">Cyprus-1 block height</div>
+          </div>
+        </div>
+
+        <div className="glass-card stat-card">
+          <div className="stat-header">
+            <span>USD PRICE / MARKET CAP</span>
+            <TrendingUp size={18} className="stat-icon" />
+          </div>
+          <div>
+            <div className="stat-value">
+              {tokenDetail?.marketStats?.priceUsd ? `$${Number(tokenDetail.marketStats.priceUsd).toFixed(9)}` : '—'}
+            </div>
+            <div className="stat-sub">
+              MCap: {tokenDetail?.marketStats?.marketCapUsd ? `$${Number(tokenDetail.marketStats.marketCapUsd).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'} (explorer.qu.ai)
+            </div>
           </div>
         </div>
       </div>
@@ -933,6 +1040,81 @@ export default function App() {
             </div>
           </div>
 
+          {/* Quainance DEX Card (new explorer.qu.ai API - https://explorer.qu.ai/api-docs) */}
+          <div className="glass-card">
+            <h2 className="section-title">
+              <TrendingUp size={20} style={{ color: 'var(--accent-gold)' }} />
+              Quainance DEX &mdash; LAPTOP Pairs
+              {quainanceTvl?.stale && (
+                <span className="lp-badge" style={{ background: 'rgba(245, 158, 11, 0.1)', color: 'var(--warning)', border: '1px solid rgba(245, 158, 11, 0.2)', fontSize: '0.6rem', marginLeft: '0.5rem' }}>STALE</span>
+              )}
+            </h2>
+            <div className="lp-price-metric" style={{ marginBottom: '1rem' }}>
+              <span className="lp-price-label">Network-Wide Quainance TVL</span>
+              <span className="lp-price-value">${Number(quainanceTvl?.current?.tvlUsd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+            </div>
+
+            {(quainanceTvl ? findQuainancePools(quainanceTvl, CONTRACTS.LAPTOP) : []).map((pool, idx, arr) => {
+              const laptopIsToken0 = pool.token0.address.toLowerCase() === CONTRACTS.LAPTOP.toLowerCase();
+              const otherSymbol = laptopIsToken0 ? pool.token1.symbol : pool.token0.symbol;
+              const laptopReserve = laptopIsToken0 ? pool.reserve0 : pool.reserve1;
+              const otherReserve = laptopIsToken0 ? pool.reserve1 : pool.reserve0;
+              const rate = Number(otherReserve) / Number(laptopReserve);
+              return (
+                <div key={pool.address} style={{ marginBottom: idx === arr.length - 1 ? 0 : '1.5rem', paddingBottom: idx === arr.length - 1 ? 0 : '1.5rem', borderBottom: idx === arr.length - 1 ? 'none' : '1px solid rgba(255,255,255,0.06)' }}>
+                  <div className="lp-header">
+                    <div className="lp-title">
+                      <span>{pool.name}</span>
+                    </div>
+                    <div className="lp-badges" style={{ alignItems: 'center', gap: '0.5rem' }}>
+                      <span className="lp-badge lp-badge-address">{formatAddr(pool.address)}</span>
+                      <button
+                        className="btn-primary"
+                        style={{ padding: '0.3rem 0.65rem', fontSize: '0.75rem', minHeight: 'auto', borderRadius: '8px', cursor: 'pointer' }}
+                        onClick={() => {
+                          const tab = pool.name === 'LAPTOP/QGIRL' ? 'LAPTOP_QGIRL' : 'LAPTOP_WQUAI';
+                          selectPoolTab(tab);
+                          const el = document.querySelector('.swap-card');
+                          if (el) el.scrollIntoView({ behavior: 'smooth' });
+                        }}
+                      >
+                        Trade
+                      </button>
+                      <a
+                        href={`https://explorer.qu.ai/address/${pool.address}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn-primary"
+                        style={{ padding: '0.3rem 0.65rem', fontSize: '0.75rem', minHeight: 'auto', borderRadius: '8px', textDecoration: 'none' }}
+                      >
+                        <ExternalLink size={12} /> View Pool
+                      </a>
+                    </div>
+                  </div>
+                  <div className="lp-reserves-row">
+                    <div className="lp-reserve-box">
+                      <div className="lp-reserve-label">LAPTOP Reserve</div>
+                      <div className="lp-reserve-value">{Number(laptopReserve).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+                    </div>
+                    <div className="lp-reserve-box">
+                      <div className="lp-reserve-label">{otherSymbol} Reserve</div>
+                      <div className="lp-reserve-value">{Number(otherReserve).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                    </div>
+                  </div>
+                  <div className="lp-price-metric">
+                    <span className="lp-price-label">Pool Stats</span>
+                    <span className="lp-price-value">
+                      1 LAPTOP = {rate.toFixed(6)} {otherSymbol} &nbsp;|&nbsp; TVL ${Number(pool.tvlUsd).toLocaleString(undefined, { maximumFractionDigits: 2 })} &nbsp;|&nbsp; 24h Vol ${Number(pool.volume24hUsd).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+            {(!quainanceTvl || findQuainancePools(quainanceTvl, CONTRACTS.LAPTOP).length === 0) && (
+              <div className="dimmed-text">No indexed LAPTOP pools found on Quainance right now.</div>
+            )}
+          </div>
+
           {/* Swap Module Card */}
           <div className="glass-card swap-card">
             <div className="swap-title">
@@ -941,7 +1123,7 @@ export default function App() {
             </div>
 
             {/* Selector Tabs */}
-            <div className="pool-selector-tabs" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
+            <div className="pool-selector-tabs" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: '0.5rem' }}>
               <button 
                 className={`pool-tab-btn ${selectedPool === 'WQUAI' ? 'active' : ''}`}
                 onClick={() => selectPoolTab('WQUAI')}
@@ -959,6 +1141,18 @@ export default function App() {
                 onClick={() => selectPoolTab('BOSS_QUAI')}
               >
                 BOSS / QUAI
+              </button>
+              <button 
+                className={`pool-tab-btn ${selectedPool === 'LAPTOP_WQUAI' ? 'active' : ''}`}
+                onClick={() => selectPoolTab('LAPTOP_WQUAI')}
+              >
+                LAPTOP / WQUAI
+              </button>
+              <button 
+                className={`pool-tab-btn ${selectedPool === 'LAPTOP_QGIRL' ? 'active' : ''}`}
+                onClick={() => selectPoolTab('LAPTOP_QGIRL')}
+              >
+                LAPTOP / QGIRL
               </button>
             </div>
 
@@ -1241,15 +1435,15 @@ export default function App() {
                 </thead>
                 <tbody>
                   {transfers.slice(0, 10).map((tx, idx) => {
-                    const isLpFrom = tx.from.toLowerCase() === CONTRACTS.LP_WQUAI.toLowerCase() || tx.from.toLowerCase() === CONTRACTS.LP_BOSS.toLowerCase();
-                    const isLpTo = tx.to.toLowerCase() === CONTRACTS.LP_WQUAI.toLowerCase() || tx.to.toLowerCase() === CONTRACTS.LP_BOSS.toLowerCase();
-                    
+                    const isLpFrom = tx.from_addr.toLowerCase() === CONTRACTS.LP_WQUAI.toLowerCase() || tx.from_addr.toLowerCase() === CONTRACTS.LP_BOSS.toLowerCase();
+                    const isLpTo = tx.to_addr.toLowerCase() === CONTRACTS.LP_WQUAI.toLowerCase() || tx.to_addr.toLowerCase() === CONTRACTS.LP_BOSS.toLowerCase();
+
                     return (
                       <tr key={`${tx.tx_hash}-${idx}`}>
                         <td>
-                          <a 
-                            href={`https://quaiscan.io/tx/${tx.tx_hash}`} 
-                            target="_blank" 
+                          <a
+                            href={`https://explorer.qu.ai/tx/${tx.tx_hash}`}
+                            target="_blank"
                             rel="noreferrer"
                             className="link-hash"
                           >
@@ -1258,12 +1452,12 @@ export default function App() {
                         </td>
                         <td>
                           <span className={`address-badge ${isLpFrom ? 'lp' : ''}`}>
-                            {isLpFrom ? 'LP Pair' : formatAddr(tx.from)}
+                            {isLpFrom ? 'LP Pair' : formatAddr(tx.from_addr)}
                           </span>
                         </td>
                         <td>
                           <span className={`address-badge ${isLpTo ? 'lp' : ''}`}>
-                            {isLpTo ? 'LP Pair' : formatAddr(tx.to)}
+                            {isLpTo ? 'LP Pair' : formatAddr(tx.to_addr)}
                           </span>
                         </td>
                         <td className="tx-value" style={{ textAlign: 'right', color: isLpFrom ? 'var(--success)' : (isLpTo ? 'var(--accent-neon)' : 'inherit') }}>
