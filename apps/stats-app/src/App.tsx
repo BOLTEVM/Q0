@@ -129,7 +129,7 @@ export default function App() {
   };
 
   const waitForTransaction = async (txHash: string): Promise<any> => {
-    const maxAttempts = 45; // 45 seconds max wait
+    const maxAttempts = 120; // 90 seconds wait (120 * 750ms)
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const receipt = await quaiRpcCall('quai_getTransactionReceipt', [txHash]);
@@ -144,9 +144,9 @@ export default function App() {
           throw e;
         }
       }
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 750));
     }
-    throw new Error("Transaction was not mined within 45 seconds.");
+    throw new Error("Transaction was not mined within 90 seconds. It may still confirm on Cyprus-1. Check status or use Manual Recovery.");
   };
 
   const parseSwapError = (err: any): string => {
@@ -157,8 +157,14 @@ export default function App() {
     return msg || "Transaction rejected or execution reverted.";
   };
 
-  const claimPendingSwap = async () => {
-    if (!walletAddress || !pendingTransferTx) return;
+  const claimPendingSwap = async (
+    overridePool?: 'WQUAI' | 'BOSS' | 'LAPTOP_WQUAI' | 'LAPTOP_QGIRL',
+    overrideTx?: string
+  ) => {
+    const activePool = overridePool || claimPool;
+    const activeTx = overrideTx || pendingTransferTx;
+
+    if (!walletAddress || !activeTx) return;
     setSwapLoading(true);
     setSwapError(null);
     setPendingSwapStep('CLAIMING');
@@ -171,15 +177,15 @@ export default function App() {
       let token0Addr = CONTRACTS.Q0;
       let token1Addr = CONTRACTS.WQUAI;
 
-      if (claimPool === 'BOSS') {
+      if (activePool === 'BOSS') {
         lpAddr = CONTRACTS.LP_BOSS;
         token0Addr = CONTRACTS.Q0;
         token1Addr = CONTRACTS.BOSS;
-      } else if (claimPool === 'LAPTOP_WQUAI') {
+      } else if (activePool === 'LAPTOP_WQUAI') {
         lpAddr = CONTRACTS.LP_LAPTOP_WQUAI;
         token0Addr = CONTRACTS.LAPTOP;
         token1Addr = CONTRACTS.WQUAI;
-      } else if (claimPool === 'LAPTOP_QGIRL') {
+      } else if (activePool === 'LAPTOP_QGIRL') {
         lpAddr = CONTRACTS.LP_LAPTOP_QGIRL;
         token0Addr = CONTRACTS.LAPTOP;
         token1Addr = CONTRACTS.QGIRL;
@@ -210,7 +216,7 @@ export default function App() {
 
       if (excess0 <= 0n && excess1 <= 0n) {
         clearPendingSwap();
-        setSwapError("Notice: This swap deposit has already been processed on-chain! Your token balances have been updated.");
+        setSwapError("Notice: This swap deposit has already been processed or synchronized on-chain. Balances are up-to-date.");
         loadWalletBalances(walletAddress);
         return;
       }
@@ -220,16 +226,19 @@ export default function App() {
       let amt1Out = 0n;
 
       if (excess1 > 0n) {
-        // Token1 (WQUAI/BOSS) was deposited -> Token0 (Q0) is being claimed
+        // Token1 was deposited -> Token0 is being claimed
         // Uniswap V2 constant product formula with 0.3% fee:
         const amountInWithFee = excess1 * 997n;
-        amt0Out = (amountInWithFee * reserve0) / (reserve1 * 1000n + amountInWithFee);
+        const maxOut = (amountInWithFee * reserve0) / (reserve1 * 1000n + amountInWithFee);
+        // Apply 0.5% margin buffer to guarantee K invariant is never violated by rounding or intervening micro-swaps
+        amt0Out = (maxOut * 995n) / 1000n;
         amt1Out = 0n;
         setClaimDirection('TOKEN_TO_Q0');
       } else if (excess0 > 0n) {
-        // Token0 (Q0) was deposited -> Token1 (WQUAI/BOSS) is being claimed
+        // Token0 was deposited -> Token1 is being claimed
         const amountInWithFee = excess0 * 997n;
-        amt1Out = (amountInWithFee * reserve1) / (reserve0 * 1000n + amountInWithFee);
+        const maxOut = (amountInWithFee * reserve1) / (reserve0 * 1000n + amountInWithFee);
+        amt1Out = (maxOut * 995n) / 1000n;
         amt0Out = 0n;
         setClaimDirection('Q0_TO_TOKEN');
       }
@@ -247,7 +256,7 @@ export default function App() {
         from: walletAddress,
         to: lpAddr,
         data: swapData,
-        gas: '0x30d40' // 200,000 gas limit
+        gas: '0x3d090' // 250,000 gas limit
       });
 
       setSwapTxHash(swapTx);
@@ -269,6 +278,8 @@ export default function App() {
     }
   };
 
+
+
   const handleManualRecovery = async () => {
     if (!manualTxHash) {
       setRecoveryError("Enter a transaction hash.");
@@ -284,7 +295,7 @@ export default function App() {
       
       const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
       let foundLog = null;
-      let poolType: 'WQUAI' | 'BOSS' = 'WQUAI';
+      let poolType: 'WQUAI' | 'BOSS' | 'LAPTOP_WQUAI' | 'LAPTOP_QGIRL' = 'WQUAI';
       let direction: 'Q0_TO_TOKEN' | 'TOKEN_TO_Q0' = 'TOKEN_TO_Q0';
 
       if (receipt.logs) {
@@ -299,26 +310,47 @@ export default function App() {
               foundLog = log;
               poolType = 'BOSS';
               break;
+            } else if (toAddress === CONTRACTS.LP_LAPTOP_WQUAI.toLowerCase()) {
+              foundLog = log;
+              poolType = 'LAPTOP_WQUAI';
+              break;
+            } else if (toAddress === CONTRACTS.LP_LAPTOP_QGIRL.toLowerCase()) {
+              foundLog = log;
+              poolType = 'LAPTOP_QGIRL';
+              break;
             }
           }
         }
       }
 
       if (!foundLog) {
-        setRecoveryError("No token transfer to Q0/WQUAI or Q0/BOSS LP contract found in this transaction.");
+        setRecoveryError("No token transfer to a supported LP contract (Q0/WQUAI, Q0/BOSS, LAPTOP/WQUAI, LAPTOP/QGIRL) found in this transaction.");
         return;
       }
 
       const tokenAddress = foundLog.address.toLowerCase();
       const amtInWei = BigInt(foundLog.data.startsWith('0x') ? foundLog.data : '0x' + foundLog.data).toString();
 
-      if (tokenAddress === CONTRACTS.Q0.toLowerCase()) {
+      let lpAddr = CONTRACTS.LP_WQUAI;
+      let token0Addr = CONTRACTS.Q0;
+
+      if (poolType === 'BOSS') {
+        lpAddr = CONTRACTS.LP_BOSS;
+        token0Addr = CONTRACTS.Q0;
+      } else if (poolType === 'LAPTOP_WQUAI') {
+        lpAddr = CONTRACTS.LP_LAPTOP_WQUAI;
+        token0Addr = CONTRACTS.LAPTOP;
+      } else if (poolType === 'LAPTOP_QGIRL') {
+        lpAddr = CONTRACTS.LP_LAPTOP_QGIRL;
+        token0Addr = CONTRACTS.LAPTOP;
+      }
+
+      if (tokenAddress === token0Addr.toLowerCase()) {
         direction = 'Q0_TO_TOKEN';
       } else {
         direction = 'TOKEN_TO_Q0';
       }
 
-      const lpAddr = poolType === 'WQUAI' ? CONTRACTS.LP_WQUAI : CONTRACTS.LP_BOSS;
       const cleanLP = lpAddr.replace('0x', '').padStart(64, '0');
       const balData = '0x70a08231' + cleanLP;
       
@@ -340,7 +372,7 @@ export default function App() {
       const excess = tokenBal - trackedReserve;
       
       if (excess <= 0n) {
-        setRecoveryError("Notice: This swap deposit has already been processed on-chain! Your wallet balances are up-to-date.");
+        setRecoveryError("Notice: This deposit was already processed or absorbed by on-chain pool activity (excess balance is 0). Your wallet token balances are up-to-date.");
         clearPendingSwap();
         if (walletAddress) loadWalletBalances(walletAddress);
         return;
@@ -694,7 +726,7 @@ export default function App() {
         from: walletAddress,
         to: tokenInAddress,
         data: transferData,
-        gas: '0xc350' // 50,000 gas limit
+        gas: '0x186a0' // 100,000 gas limit (hardened)
       });
 
       console.log("Transfer TX Hash:", transferTx);
@@ -713,8 +745,8 @@ export default function App() {
       await waitForTransaction(transferTx);
       setPendingSwapStep('READY_TO_CLAIM');
 
-      // Fetch dynamic balance to compute exact excess
-      await claimPendingSwap();
+      // Fetch dynamic balance to compute exact excess and execute Step 2 with explicit parameters
+      await claimPendingSwap(selectedPool as any, transferTx);
 
     } catch (e: any) {
       console.error("Swap Transaction failed:", e);
@@ -1272,7 +1304,7 @@ export default function App() {
             {pendingSwapStep === 'READY_TO_CLAIM' && (
               <div style={{ background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.2)', padding: '1rem', borderRadius: '14px', marginBottom: '1.5rem' }}>
                 <h4 style={{ color: 'var(--warning)', fontSize: '0.9rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <TrendingUp size={16} /> Unclaimed Swap Pending
+                  <TrendingUp size={16} /> Unclaimed Swap Pending ({claimPool})
                 </h4>
                 <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
                   Token deposit verified (Tx: {formatAddr(pendingTransferTx || '')}). Click below to claim your estimated <strong>{formatUnits(claimMinReceived)} {getClaimTokenSymbol()}</strong> tokens.
@@ -1281,10 +1313,10 @@ export default function App() {
                   <button 
                     className="btn-primary" 
                     style={{ background: 'var(--accent-gold)', flex: 1, padding: '0.5rem', fontSize: '0.8rem', color: '#000', justifyContent: 'center' }}
-                    onClick={claimPendingSwap}
+                    onClick={() => claimPendingSwap()}
                     disabled={swapLoading}
                   >
-                    {swapLoading ? 'Claiming...' : 'Complete Swap (Step 2)'}
+                    {swapLoading ? 'Executing...' : 'Complete Swap (Step 2)'}
                   </button>
                   <button 
                     className="btn-primary" 
@@ -1292,8 +1324,19 @@ export default function App() {
                     onClick={clearPendingSwap}
                     disabled={swapLoading}
                   >
-                    Discard
+                    Dismiss
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* Claiming in Progress Card */}
+            {pendingSwapStep === 'CLAIMING' && (
+              <div style={{ background: 'rgba(245, 158, 11, 0.05)', border: '1px solid rgba(245, 158, 11, 0.2)', padding: '1rem', borderRadius: '14px', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <div className="loader" style={{ width: '24px', height: '24px', borderWidth: '2px', margin: 0 }}></div>
+                <div style={{ fontSize: '0.8rem' }}>
+                  <strong>Step 2: Claiming swap output from LP...</strong>
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Calling pair.swap() with dynamic excess balance verification</div>
                 </div>
               </div>
             )}
