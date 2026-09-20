@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   CONTRACTS,
+  QUAINANCE_ROUTER,
   getTokenMetadata,
   getLPReserves,
   getLatestBlockNumber,
@@ -79,54 +80,8 @@ export default function App() {
   const [swapTxHash, setSwapTxHash] = useState<string | null>(null);
   const [swapError, setSwapError] = useState<string | null>(null);
 
-  // Recovery States
-  const [pendingTransferTx, setPendingTransferTx] = useState<string | null>(null);
-  const [pendingSwapStep, setPendingSwapStep] = useState<'IDLE' | 'WAITING_FOR_CONFIRMATION' | 'READY_TO_CLAIM' | 'CLAIMING'>('IDLE');
-  const [claimMinReceived, setClaimMinReceived] = useState<string>('0');
-  const [claimPool, setClaimPool] = useState<'WQUAI' | 'BOSS' | 'LAPTOP_WQUAI' | 'LAPTOP_QGIRL'>('WQUAI');
-  const [claimDirection, setClaimDirection] = useState<'Q0_TO_TOKEN' | 'TOKEN_TO_Q0'>('TOKEN_TO_Q0');
-  const [manualTxHash, setManualTxHash] = useState<string>('');
-  const [showRecoveryBox, setShowRecoveryBox] = useState<boolean>(false);
-  const [recoveryError, setRecoveryError] = useState<string | null>(null);
-
-  // Load pending transfer from localStorage on mount
-  useEffect(() => {
-    const savedTx = localStorage.getItem('pendingTransferTx');
-    const savedStep = localStorage.getItem('pendingSwapStep');
-    const savedMinReceived = localStorage.getItem('claimMinReceived');
-    const savedPool = localStorage.getItem('claimPool');
-    const savedDirection = localStorage.getItem('claimDirection');
-    if (savedTx && savedStep) {
-      setPendingTransferTx(savedTx);
-      setPendingSwapStep(savedStep as any);
-      if (savedMinReceived) setClaimMinReceived(savedMinReceived);
-      if (savedPool) setClaimPool(savedPool as any);
-      if (savedDirection) setClaimDirection(savedDirection as any);
-    }
-  }, []);
-
-  const savePendingSwap = (tx: string, step: string, minRec: string, pool: string, dir: string) => {
-    localStorage.setItem('pendingTransferTx', tx);
-    localStorage.setItem('pendingSwapStep', step);
-    localStorage.setItem('claimMinReceived', minRec);
-    localStorage.setItem('claimPool', pool);
-    localStorage.setItem('claimDirection', dir);
-    setPendingTransferTx(tx);
-    setPendingSwapStep(step as any);
-    setClaimMinReceived(minRec);
-    setClaimPool(pool as any);
-    setClaimDirection(dir as any);
-  };
-
-  const clearPendingSwap = () => {
-    localStorage.removeItem('pendingTransferTx');
-    localStorage.removeItem('pendingSwapStep');
-    localStorage.removeItem('claimMinReceived');
-    localStorage.removeItem('claimPool');
-    localStorage.removeItem('claimDirection');
-    setPendingTransferTx(null);
-    setPendingSwapStep('IDLE');
-  };
+  // Atomic router swap progress state ('IDLE' | 'APPROVING' | 'SWAPPING')
+  const [pendingSwapStep, setPendingSwapStep] = useState<'IDLE' | 'APPROVING' | 'SWAPPING'>('IDLE');
 
   const waitForTransaction = async (txHash: string): Promise<any> => {
     const maxAttempts = 120; // 90 seconds wait (120 * 750ms)
@@ -157,251 +112,61 @@ export default function App() {
     return msg || "Transaction rejected or execution reverted.";
   };
 
-  const claimPendingSwap = async (
-    overridePool?: 'WQUAI' | 'BOSS' | 'LAPTOP_WQUAI' | 'LAPTOP_QGIRL',
-    overrideTx?: string
-  ) => {
-    const activePool = overridePool || claimPool;
-    const activeTx = overrideTx || pendingTransferTx;
+  /**
+   * ABI-encode a call to the Quainance Router's swapExactTokensForTokens:
+   *   function swapExactTokensForTokens(
+   *     uint256 amountIn,
+   *     uint256 amountOutMin,
+   *     address[] calldata path,
+   *     address to,
+   *     uint256 deadline
+   *   ) returns (uint256[] memory amounts)
+   *
+   * Selector: 0x38ed1739
+   * Dynamic layout (all 32-byte slots):
+   *   [0] amountIn
+   *   [1] amountOutMin
+   *   [2] offset to path array  = 0xa0 (5 static words * 32)
+   *   [3] to
+   *   [4] deadline
+   *   [5] path.length
+   *   [6..] path elements
+   */
+  const encodeRouterSwap = (
+    amountIn: bigint,
+    amountOutMin: bigint,
+    path: string[],
+    to: string,
+    deadline: bigint
+  ): string => {
+    const pad = (n: bigint | number, bits = 32) =>
+      BigInt(n).toString(16).padStart(bits * 2, '0');
+    const padAddr = (addr: string) =>
+      addr.replace('0x', '').toLowerCase().padStart(64, '0');
 
-    if (!walletAddress || !activeTx) return;
-    setSwapLoading(true);
-    setSwapError(null);
-    setPendingSwapStep('CLAIMING');
-    try {
-      const provider = getQuaiProvider();
-      if (!provider) {
-        throw new Error("Pelagus / Quai provider not found.");
-      }
-      let lpAddr = CONTRACTS.LP_WQUAI;
-      let token0Addr = CONTRACTS.Q0;
-      let token1Addr = CONTRACTS.WQUAI;
+    const pathOffset = BigInt(0xa0); // 5 static slots × 32 bytes
+    const pathLen = BigInt(path.length);
+    const pathEncoded = path.map(padAddr).join('');
 
-      if (activePool === 'BOSS') {
-        lpAddr = CONTRACTS.LP_BOSS;
-        token0Addr = CONTRACTS.Q0;
-        token1Addr = CONTRACTS.BOSS;
-      } else if (activePool === 'LAPTOP_WQUAI') {
-        lpAddr = CONTRACTS.LP_LAPTOP_WQUAI;
-        token0Addr = CONTRACTS.LAPTOP;
-        token1Addr = CONTRACTS.WQUAI;
-      } else if (activePool === 'LAPTOP_QGIRL') {
-        lpAddr = CONTRACTS.LP_LAPTOP_QGIRL;
-        token0Addr = CONTRACTS.LAPTOP;
-        token1Addr = CONTRACTS.QGIRL;
-      }
-
-      // On-Chain Excess Reserve Pre-Validation & Dynamic Calculation
-      const cleanLP = lpAddr.replace('0x', '').padStart(64, '0');
-      const balData = '0x70a08231' + cleanLP;
-      
-      const [bal0Hex, bal1Hex, resHex] = await Promise.all([
-        quaiRpcCall('quai_call', [{ to: token0Addr, data: balData }, 'latest']),
-        quaiRpcCall('quai_call', [{ to: token1Addr, data: balData }, 'latest']),
-        quaiRpcCall('quai_call', [{ to: lpAddr, data: '0x0902f1ac' }, 'latest'])
-      ]);
-
-      if (!bal0Hex || !bal1Hex || !resHex || resHex.length < 130) {
-        throw new Error("Failed to fetch pool reserves and balances.");
-      }
-
-      const bal0 = BigInt(bal0Hex);
-      const bal1 = BigInt(bal1Hex);
-      const rawRes = resHex.replace('0x', '');
-      const reserve0 = BigInt('0x' + rawRes.slice(0, 64));
-      const reserve1 = BigInt('0x' + rawRes.slice(64, 128));
-
-      const excess0 = bal0 - reserve0;
-      const excess1 = bal1 - reserve1;
-
-      if (excess0 <= 0n && excess1 <= 0n) {
-        clearPendingSwap();
-        setSwapError("Notice: This swap deposit has already been processed or synchronized on-chain. Balances are up-to-date.");
-        loadWalletBalances(walletAddress);
-        return;
-      }
-
-      // Automatically determine swap direction and exact output from on-chain excess:
-      let amt0Out = 0n;
-      let amt1Out = 0n;
-
-      if (excess1 > 0n) {
-        // Token1 was deposited -> Token0 is being claimed
-        // Uniswap V2 constant product formula with 0.3% fee:
-        const amountInWithFee = excess1 * 997n;
-        const maxOut = (amountInWithFee * reserve0) / (reserve1 * 1000n + amountInWithFee);
-        // Apply 0.5% margin buffer to guarantee K invariant is never violated by rounding or intervening micro-swaps
-        amt0Out = (maxOut * 995n) / 1000n;
-        amt1Out = 0n;
-        setClaimDirection('TOKEN_TO_Q0');
-      } else if (excess0 > 0n) {
-        // Token0 was deposited -> Token1 is being claimed
-        const amountInWithFee = excess0 * 997n;
-        const maxOut = (amountInWithFee * reserve1) / (reserve0 * 1000n + amountInWithFee);
-        amt1Out = (maxOut * 995n) / 1000n;
-        amt0Out = 0n;
-        setClaimDirection('Q0_TO_TOKEN');
-      }
-
-      const cleanAmt0 = amt0Out.toString(16).padStart(64, '0');
-      const cleanAmt1 = amt1Out.toString(16).padStart(64, '0');
-      const cleanUser = walletAddress.replace('0x', '').padStart(64, '0');
-      const dataOffset = '0000000000000000000000000000000000000000000000000000000000000080';
-      const dataLen = '0000000000000000000000000000000000000000000000000000000000000000';
-      
-      const swapData = '0x022c0d9f' + cleanAmt0 + cleanAmt1 + cleanUser + dataOffset + dataLen;
-
-      console.log("Sending Swap transaction (Claim mode)...");
-      const swapTx = await sendWalletTransaction(provider, {
-        from: walletAddress,
-        to: lpAddr,
-        data: swapData,
-        gas: '0x3d090' // 250,000 gas limit
-      });
-
-      setSwapTxHash(swapTx);
-      await waitForTransaction(swapTx);
-      clearPendingSwap();
-      loadWalletBalances(walletAddress);
-      setTimeout(() => loadWalletBalances(walletAddress), 2000);
-      setTimeout(() => {
-        loadWalletBalances(walletAddress);
-        fetchData(true);
-      }, 5000);
-
-    } catch (e: any) {
-      console.error("Claim Transaction failed:", e);
-      setSwapError(parseSwapError(e));
-      setPendingSwapStep('READY_TO_CLAIM');
-    } finally {
-      setSwapLoading(false);
-    }
+    return (
+      '0x38ed1739' +
+      pad(amountIn) +
+      pad(amountOutMin) +
+      pad(pathOffset) +
+      padAddr(to) +
+      pad(deadline) +
+      pad(pathLen) +
+      pathEncoded
+    );
   };
 
-
-
-  const handleManualRecovery = async () => {
-    if (!manualTxHash) {
-      setRecoveryError("Enter a transaction hash.");
-      return;
-    }
-    setRecoveryError(null);
-    try {
-      const receipt = await quaiRpcCall('quai_getTransactionReceipt', [manualTxHash]);
-      if (!receipt) {
-        setRecoveryError("Transaction receipt not found. Check the hash and network.");
-        return;
-      }
-      
-      const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-      let foundLog = null;
-      let poolType: 'WQUAI' | 'BOSS' | 'LAPTOP_WQUAI' | 'LAPTOP_QGIRL' = 'WQUAI';
-      let direction: 'Q0_TO_TOKEN' | 'TOKEN_TO_Q0' = 'TOKEN_TO_Q0';
-
-      if (receipt.logs) {
-        for (const log of receipt.logs) {
-          if (log.topics && log.topics[0] === transferTopic) {
-            const toAddress = '0x' + log.topics[2].slice(-40).toLowerCase();
-            if (toAddress === CONTRACTS.LP_WQUAI.toLowerCase()) {
-              foundLog = log;
-              poolType = 'WQUAI';
-              break;
-            } else if (toAddress === CONTRACTS.LP_BOSS.toLowerCase()) {
-              foundLog = log;
-              poolType = 'BOSS';
-              break;
-            } else if (toAddress === CONTRACTS.LP_LAPTOP_WQUAI.toLowerCase()) {
-              foundLog = log;
-              poolType = 'LAPTOP_WQUAI';
-              break;
-            } else if (toAddress === CONTRACTS.LP_LAPTOP_QGIRL.toLowerCase()) {
-              foundLog = log;
-              poolType = 'LAPTOP_QGIRL';
-              break;
-            }
-          }
-        }
-      }
-
-      if (!foundLog) {
-        setRecoveryError("No token transfer to a supported LP contract (Q0/WQUAI, Q0/BOSS, LAPTOP/WQUAI, LAPTOP/QGIRL) found in this transaction.");
-        return;
-      }
-
-      const tokenAddress = foundLog.address.toLowerCase();
-      const amtInWei = BigInt(foundLog.data.startsWith('0x') ? foundLog.data : '0x' + foundLog.data).toString();
-
-      let lpAddr = CONTRACTS.LP_WQUAI;
-      let token0Addr = CONTRACTS.Q0;
-
-      if (poolType === 'BOSS') {
-        lpAddr = CONTRACTS.LP_BOSS;
-        token0Addr = CONTRACTS.Q0;
-      } else if (poolType === 'LAPTOP_WQUAI') {
-        lpAddr = CONTRACTS.LP_LAPTOP_WQUAI;
-        token0Addr = CONTRACTS.LAPTOP;
-      } else if (poolType === 'LAPTOP_QGIRL') {
-        lpAddr = CONTRACTS.LP_LAPTOP_QGIRL;
-        token0Addr = CONTRACTS.LAPTOP;
-      }
-
-      if (tokenAddress === token0Addr.toLowerCase()) {
-        direction = 'Q0_TO_TOKEN';
-      } else {
-        direction = 'TOKEN_TO_Q0';
-      }
-
-      const cleanLP = lpAddr.replace('0x', '').padStart(64, '0');
-      const balData = '0x70a08231' + cleanLP;
-      
-      const [balHex, resHex] = await Promise.all([
-        quaiRpcCall('quai_call', [{ to: tokenAddress, data: balData }, 'latest']),
-        quaiRpcCall('quai_call', [{ to: lpAddr, data: '0x0902f1ac' }, 'latest'])
-      ]);
-
-      if (!balHex || !resHex || resHex.length < 130) {
-        setRecoveryError("Failed to fetch current LP reserves.");
-        return;
-      }
-
-      const tokenBal = BigInt(balHex);
-      const rawRes = resHex.replace('0x', '');
-      const reserve0 = BigInt('0x' + rawRes.slice(0, 64));
-      const reserve1 = BigInt('0x' + rawRes.slice(64, 128));
-      const trackedReserve = direction === 'Q0_TO_TOKEN' ? reserve0 : reserve1;
-      const excess = tokenBal - trackedReserve;
-      
-      if (excess <= 0n) {
-        setRecoveryError("Notice: This deposit was already processed or absorbed by on-chain pool activity (excess balance is 0). Your wallet token balances are up-to-date.");
-        clearPendingSwap();
-        if (walletAddress) loadWalletBalances(walletAddress);
-        return;
-      }
-
-      let reserveIn = reserve0.toString();
-      let reserveOut = reserve1.toString();
-      if (direction === 'TOKEN_TO_Q0') {
-        reserveIn = reserve1.toString();
-        reserveOut = reserve0.toString();
-      }
-
-      const sim = simulateSwap(amtInWei, reserveIn, reserveOut, 1.0);
-      
-      savePendingSwap(
-        manualTxHash,
-        'READY_TO_CLAIM',
-        sim.minimumReceived,
-        poolType,
-        direction
-      );
-      
-      setShowRecoveryBox(false);
-      setManualTxHash('');
-      setSwapError(null);
-    } catch (e: any) {
-      console.error("Recovery failed:", e);
-      setRecoveryError("Failed to parse transaction: " + e.message);
-    }
+  /**
+   * ABI-encode ERC-20 approve(spender, amount) — selector 0x095ea7b3
+   */
+  const encodeApprove = (spender: string, amount: bigint): string => {
+    const cleanSpender = spender.replace('0x', '').toLowerCase().padStart(64, '0');
+    const cleanAmount = amount.toString(16).padStart(64, '0');
+    return '0x095ea7b3' + cleanSpender + cleanAmount;
   };
 
   // Top Holders (parsed from transfers for visual representation)
@@ -660,7 +425,7 @@ export default function App() {
     setMinReceived('0');
   };
 
-  // Execute Swap transaction
+  // Execute Swap — atomic router flow (approve → swapExactTokensForTokens)
   const executeSwap = async () => {
     if (!walletAddress) {
       connectWallet();
@@ -682,81 +447,101 @@ export default function App() {
       setSwapLoading(false);
       return;
     }
-    let lpAddr = CONTRACTS.LP_WQUAI;
-    let tokenInAddress = CONTRACTS.Q0;
+
+    // Determine token-in address and swap path through the router
+    let tokenInAddress: string;
+    let swapPath: string[];
 
     if (selectedPool === 'WQUAI') {
-      lpAddr = CONTRACTS.LP_WQUAI;
-      tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.Q0 : CONTRACTS.WQUAI;
-    } else if (selectedPool === 'BOSS') {
-      lpAddr = CONTRACTS.LP_BOSS;
-      tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.Q0 : CONTRACTS.BOSS;
-    } else if (selectedPool === 'LAPTOP_WQUAI') {
-      lpAddr = CONTRACTS.LP_LAPTOP_WQUAI;
-      tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.LAPTOP : CONTRACTS.WQUAI;
-    } else if (selectedPool === 'LAPTOP_QGIRL') {
-      lpAddr = CONTRACTS.LP_LAPTOP_QGIRL;
-      tokenInAddress = swapDirection === 'Q0_TO_TOKEN' ? CONTRACTS.LAPTOP : CONTRACTS.QGIRL;
-    } else if (selectedPool === 'BOSS_QUAI') {
       if (swapDirection === 'Q0_TO_TOKEN') {
-        lpAddr = CONTRACTS.LP_BOSS;
-        tokenInAddress = CONTRACTS.BOSS;
+        tokenInAddress = CONTRACTS.Q0;
+        swapPath = [CONTRACTS.Q0, CONTRACTS.WQUAI];
       } else {
-        lpAddr = CONTRACTS.LP_WQUAI;
         tokenInAddress = CONTRACTS.WQUAI;
+        swapPath = [CONTRACTS.WQUAI, CONTRACTS.Q0];
+      }
+    } else if (selectedPool === 'BOSS') {
+      if (swapDirection === 'Q0_TO_TOKEN') {
+        tokenInAddress = CONTRACTS.Q0;
+        swapPath = [CONTRACTS.Q0, CONTRACTS.BOSS];
+      } else {
+        tokenInAddress = CONTRACTS.BOSS;
+        swapPath = [CONTRACTS.BOSS, CONTRACTS.Q0];
+      }
+    } else if (selectedPool === 'LAPTOP_WQUAI') {
+      if (swapDirection === 'Q0_TO_TOKEN') {
+        tokenInAddress = CONTRACTS.LAPTOP;
+        swapPath = [CONTRACTS.LAPTOP, CONTRACTS.WQUAI];
+      } else {
+        tokenInAddress = CONTRACTS.WQUAI;
+        swapPath = [CONTRACTS.WQUAI, CONTRACTS.LAPTOP];
+      }
+    } else if (selectedPool === 'LAPTOP_QGIRL') {
+      if (swapDirection === 'Q0_TO_TOKEN') {
+        tokenInAddress = CONTRACTS.LAPTOP;
+        swapPath = [CONTRACTS.LAPTOP, CONTRACTS.QGIRL];
+      } else {
+        tokenInAddress = CONTRACTS.QGIRL;
+        swapPath = [CONTRACTS.QGIRL, CONTRACTS.LAPTOP];
+      }
+    } else {
+      // BOSS_QUAI — multi-hop routed through WQUAI
+      if (swapDirection === 'Q0_TO_TOKEN') {
+        // BOSS → WQUAI (via Q0 pool then WQUAI pool)
+        tokenInAddress = CONTRACTS.BOSS;
+        swapPath = [CONTRACTS.BOSS, CONTRACTS.Q0, CONTRACTS.WQUAI];
+      } else {
+        // WQUAI → BOSS (via Q0 pool then BOSS pool)
+        tokenInAddress = CONTRACTS.WQUAI;
+        swapPath = [CONTRACTS.WQUAI, CONTRACTS.Q0, CONTRACTS.BOSS];
       }
     }
 
-    // Swap Details
-    const amtInWei = BigInt(Math.floor(Number(swapAmountIn) * 1e18)).toString();
-    const amtOutMinWei = BigInt(Math.floor(Number(minReceived) * 1e18)).toString();
+    const amtInWei = BigInt(Math.floor(Number(swapAmountIn) * 1e18));
+    const amtOutMinWei = BigInt(Math.floor(Number(minReceived) * 1e18));
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 300); // 5 minutes
 
     try {
-      // Step 1: Send Transfer transaction to LP
-      setPendingSwapStep('WAITING_FOR_CONFIRMATION');
-      console.log(`Swapping ${swapAmountIn} via LP contract: ${lpAddr}`);
-
-      // ERC20 Transfer selector: transfer(address,uint256) -> 0xa9059cbb
-      const cleanLPAddr = lpAddr.replace('0x', '').padStart(64, '0');
-      const cleanAmt = BigInt(amtInWei).toString(16).padStart(64, '0');
-      const transferData = '0xa9059cbb' + cleanLPAddr + cleanAmt;
-
-      console.log("Sending Transfer transaction to LP...");
-      const transferTx = await sendWalletTransaction(provider, {
+      // ── Step 1: Approve the Quainance Router to spend tokenIn ──────────────
+      setPendingSwapStep('APPROVING');
+      console.log(`[Swap] Approving router ${QUAINANCE_ROUTER} to spend ${amtInWei} of ${tokenInAddress}`);
+      const approveData = encodeApprove(QUAINANCE_ROUTER, amtInWei);
+      const approveTx = await sendWalletTransaction(provider, {
         from: walletAddress,
         to: tokenInAddress,
-        data: transferData,
-        gas: '0x186a0' // 100,000 gas limit (hardened)
+        data: approveData,
+        gas: '0x186a0' // 100 000 gas
       });
+      console.log("[Swap] Approve TX:", approveTx);
+      await waitForTransaction(approveTx);
 
-      console.log("Transfer TX Hash:", transferTx);
-      
-      // Save state in case step 2 fails
-      savePendingSwap(
-        transferTx,
-        'READY_TO_CLAIM',
-        amtOutMinWei,
-        selectedPool,
-        swapDirection
-      );
+      // ── Step 2: Call swapExactTokensForTokens on the Router ────────────────
+      setPendingSwapStep('SWAPPING');
+      console.log(`[Swap] Calling swapExactTokensForTokens path=${JSON.stringify(swapPath)}`);
+      const swapData = encodeRouterSwap(amtInWei, amtOutMinWei, swapPath, walletAddress, deadline);
+      const swapTx = await sendWalletTransaction(provider, {
+        from: walletAddress,
+        to: QUAINANCE_ROUTER,
+        data: swapData,
+        gas: '0x4c4b4' // 313 524 gas (generous limit for multi-hop)
+      });
+      console.log("[Swap] Swap TX:", swapTx);
+      setSwapTxHash(swapTx);
+      await waitForTransaction(swapTx);
 
-      // Step 2: Call swap() on LP pair contract
-      console.log("Waiting for Transfer to confirm before claiming...");
-      await waitForTransaction(transferTx);
-      setPendingSwapStep('READY_TO_CLAIM');
-
-      // Fetch dynamic balance to compute exact excess and execute Step 2 with explicit parameters
-      await claimPendingSwap(selectedPool as any, transferTx);
+      // ── Success: Reload balances ────────────────────────────────────────────
+      setPendingSwapStep('IDLE');
+      loadWalletBalances(walletAddress);
+      setTimeout(() => loadWalletBalances(walletAddress), 2000);
+      setTimeout(() => {
+        loadWalletBalances(walletAddress);
+        fetchData(true);
+      }, 5000);
 
     } catch (e: any) {
-      console.error("Swap Transaction failed:", e);
+      console.error("[Swap] Failed:", e);
       setSwapError(parseSwapError(e));
-      // If we already successfully transferred tokens, stay in READY_TO_CLAIM step
-      if (localStorage.getItem('pendingTransferTx')) {
-        setPendingSwapStep('READY_TO_CLAIM');
-      } else {
-        setPendingSwapStep('IDLE');
-      }
+      setPendingSwapStep('IDLE');
     } finally {
       setSwapLoading(false);
     }
@@ -805,18 +590,6 @@ export default function App() {
     return swapDirection === 'Q0_TO_TOKEN' ? selectedPool : 'Q0';
   };
 
-  const getClaimTokenSymbol = () => {
-    if (claimPool === 'LAPTOP_WQUAI') {
-      return claimDirection === 'Q0_TO_TOKEN' ? 'WQUAI' : 'LAPTOP';
-    }
-    if (claimPool === 'LAPTOP_QGIRL') {
-      return claimDirection === 'Q0_TO_TOKEN' ? 'QGIRL' : 'LAPTOP';
-    }
-    if (claimDirection === 'Q0_TO_TOKEN') {
-      return claimPool === 'WQUAI' ? 'WQUAI' : 'BOSS';
-    }
-    return 'Q0';
-  };
 
   // Loading Screen
   if (loading) {
@@ -1300,54 +1073,24 @@ export default function App() {
               </div>
             </div>
 
-            {/* Pending Swap Warning / Step 2 claim */}
-            {pendingSwapStep === 'READY_TO_CLAIM' && (
-              <div style={{ background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.2)', padding: '1rem', borderRadius: '14px', marginBottom: '1.5rem' }}>
-                <h4 style={{ color: 'var(--warning)', fontSize: '0.9rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <TrendingUp size={16} /> Unclaimed Swap Pending ({claimPool})
-                </h4>
-                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-                  Token deposit verified (Tx: {formatAddr(pendingTransferTx || '')}). Click below to claim your estimated <strong>{formatUnits(claimMinReceived)} {getClaimTokenSymbol()}</strong> tokens.
-                </p>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button 
-                    className="btn-primary" 
-                    style={{ background: 'var(--accent-gold)', flex: 1, padding: '0.5rem', fontSize: '0.8rem', color: '#000', justifyContent: 'center' }}
-                    onClick={() => claimPendingSwap()}
-                    disabled={swapLoading}
-                  >
-                    {swapLoading ? 'Executing...' : 'Complete Swap (Step 2)'}
-                  </button>
-                  <button 
-                    className="btn-primary" 
-                    style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--panel-border)', color: 'var(--text-muted)', padding: '0.5rem', fontSize: '0.8rem', boxShadow: 'none', justifyContent: 'center' }}
-                    onClick={clearPendingSwap}
-                    disabled={swapLoading}
-                  >
-                    Dismiss
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Claiming in Progress Card */}
-            {pendingSwapStep === 'CLAIMING' && (
-              <div style={{ background: 'rgba(245, 158, 11, 0.05)', border: '1px solid rgba(245, 158, 11, 0.2)', padding: '1rem', borderRadius: '14px', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                <div className="loader" style={{ width: '24px', height: '24px', borderWidth: '2px', margin: 0 }}></div>
-                <div style={{ fontSize: '0.8rem' }}>
-                  <strong>Step 2: Claiming swap output from LP...</strong>
-                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Calling pair.swap() with dynamic excess balance verification</div>
-                </div>
-              </div>
-            )}
-
-            {/* Waiting for Confirmation Progress Card */}
-            {pendingSwapStep === 'WAITING_FOR_CONFIRMATION' && (
+            {/* Step 1: Approving router allowance */}
+            {pendingSwapStep === 'APPROVING' && (
               <div style={{ background: 'rgba(0, 242, 254, 0.05)', border: '1px solid rgba(0, 242, 254, 0.15)', padding: '1rem', borderRadius: '14px', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
                 <div className="loader" style={{ width: '24px', height: '24px', borderWidth: '2px', margin: 0 }}></div>
                 <div style={{ fontSize: '0.8rem' }}>
-                  <strong>Step 1: Staging Transfer sent...</strong>
-                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Waiting for on-chain block confirmation (Cyprus-1)</div>
+                  <strong>Step 1 of 2: Approving Router…</strong>
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Authorising the Quainance Router to spend your tokens (one-time per swap)</div>
+                </div>
+              </div>
+            )}
+
+            {/* Step 2: Router executing the swap */}
+            {pendingSwapStep === 'SWAPPING' && (
+              <div style={{ background: 'rgba(138, 43, 226, 0.06)', border: '1px solid rgba(138, 43, 226, 0.2)', padding: '1rem', borderRadius: '14px', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <div className="loader" style={{ width: '24px', height: '24px', borderWidth: '2px', margin: 0 }}></div>
+                <div style={{ fontSize: '0.8rem' }}>
+                  <strong>Step 2 of 2: Swap executing on-chain…</strong>
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Quainance Router is routing the swap atomically — no MEV window</div>
                 </div>
               </div>
             )}
@@ -1375,55 +1118,17 @@ export default function App() {
             <button 
               className="btn-primary btn-swap-submit" 
               onClick={executeSwap}
-              disabled={swapLoading || pendingSwapStep === 'WAITING_FOR_CONFIRMATION'}
+              disabled={swapLoading || pendingSwapStep !== 'IDLE'}
               style={{ justifyContent: 'center' }}
             >
-              {swapLoading ? 'Broadcasting...' : (walletAddress ? 'Confirm Swap' : 'Connect Wallet to Swap')}
+              {pendingSwapStep === 'APPROVING'
+                ? 'Approving…'
+                : pendingSwapStep === 'SWAPPING'
+                ? 'Swapping…'
+                : (walletAddress ? 'Confirm Swap' : 'Connect Wallet to Swap')}
             </button>
             <div className="dimmed-text">
-              Direct LP Interface on Cyprus-1.
-            </div>
-
-            {/* Manual Recovery Box */}
-            <div style={{ marginTop: '1rem', paddingTop: '0.75rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-              {!showRecoveryBox ? (
-                <button 
-                  style={{ background: 'none', border: 'none', color: 'var(--text-dim)', fontSize: '0.75rem', cursor: 'pointer', textDecoration: 'underline', width: '100%', textAlign: 'center' }}
-                  onClick={() => setShowRecoveryBox(true)}
-                >
-                  Need to recover a stuck swap transaction manually?
-                </button>
-              ) : (
-                <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--panel-border)', borderRadius: '10px', padding: '0.75rem' }}>
-                  <div style={{ fontSize: '0.75rem', fontWeight: 600, marginBottom: '0.5rem', color: 'var(--text-muted)' }}>Recover Stuck Swap</div>
-                  <input 
-                    type="text" 
-                    placeholder="Enter Transfer Tx Hash (0x...)"
-                    value={manualTxHash}
-                    onChange={(e) => setManualTxHash(e.target.value)}
-                    style={{ width: '100%', background: 'rgba(0,0,0,0.2)', border: '1px solid var(--panel-border)', borderRadius: '6px', padding: '0.4rem', color: 'var(--text-main)', fontSize: '0.75rem', fontFamily: 'monospace', marginBottom: '0.5rem', outline: 'none' }}
-                  />
-                  {recoveryError && (
-                    <div style={{ fontSize: '0.7rem', color: 'var(--error)', marginBottom: '0.5rem' }}>{recoveryError}</div>
-                  )}
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button 
-                      className="btn-primary" 
-                      style={{ padding: '0.35rem 0.75rem', fontSize: '0.75rem', flex: 1, justifyContent: 'center' }}
-                      onClick={handleManualRecovery}
-                    >
-                      Scan & Recover
-                    </button>
-                    <button 
-                      className="btn-primary" 
-                      style={{ padding: '0.35rem 0.75rem', fontSize: '0.75rem', background: 'rgba(255,255,255,0.04)', border: '1px solid var(--panel-border)', color: 'var(--text-muted)', boxShadow: 'none', justifyContent: 'center' }}
-                      onClick={() => { setShowRecoveryBox(false); setRecoveryError(null); }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
+              Atomic Router Swaps via Quainance Router on Cyprus-1.
             </div>
           </div>
         </div>

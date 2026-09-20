@@ -19,6 +19,8 @@ export const DEFAULT_EXPLORER = 'https://quaiscan.io';
 export const EXPLORER_V2 = 'https://explorer.qu.ai';
 // Quainance DEX factory (second Quai DEX, distinct from Quaiswap)
 export const QUAINANCE_FACTORY = '0x0018a110b6ca369dcf5ab062c72f049e93b9ede2';
+// Quainance Router — verified deployed, 40 438 bytes of bytecode on Cyprus-1
+export const QUAINANCE_ROUTER = '0x000d6795e06eA4F460CA9572a51741342156305A';
 
 // ERC20 function selectors
 export const SELECTORS = {
