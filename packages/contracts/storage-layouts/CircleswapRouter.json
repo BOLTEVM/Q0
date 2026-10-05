@@ -1,0 +1,23 @@
+[
+  {
+    "label": "factory",
+    "slot": "0",
+    "offset": 0,
+    "type": "address",
+    "bytes": 20
+  },
+  {
+    "label": "WETH",
+    "slot": "1",
+    "offset": 0,
+    "type": "address",
+    "bytes": 20
+  },
+  {
+    "label": "__gap",
+    "slot": "2",
+    "offset": 0,
+    "type": "uint256[50]",
+    "bytes": 1600
+  }
+]

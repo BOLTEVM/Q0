@@ -1,0 +1,15 @@
+{
+  "uri": "https://arweave.net/MbJXaZJwc0PjrCK2iwBblrR6m0aAYIUJ7xsIIpQpHQk",
+  "txid": "MbJXaZJwc0PjrCK2iwBblrR6m0aAYIUJ7xsIIpQpHQk",
+  "sha256": "c377e4cf70bb42e0cea497cc879cc6fb5dcd04ee3f4050c3805992fc3f2ff72f",
+  "bytes": 2140452,
+  "contentType": "image/gif",
+  "uploadedAt": "2026-10-04T16:50:00.000Z",
+  "verified": true,
+  "arfs": {
+    "fileId": "87e77984-7ee1-466b-a6a7-771a8b48db71",
+    "metadataTxId": "4dt_4ZGHe_B-cfSnfI740-9IA2wy72MpJOIivd8fMwM",
+    "blockHeight": 2013397,
+    "thumbnailTxId": "4L06o1bAsy-NCu4SnTtO--GdJDJQvSGI2wmtTRW0Nv4"
+  }
+}

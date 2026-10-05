@@ -1,0 +1,72 @@
+[
+  {
+    "label": "factory",
+    "slot": "0",
+    "offset": 0,
+    "type": "address",
+    "bytes": 20
+  },
+  {
+    "label": "token0",
+    "slot": "1",
+    "offset": 0,
+    "type": "address",
+    "bytes": 20
+  },
+  {
+    "label": "token1",
+    "slot": "2",
+    "offset": 0,
+    "type": "address",
+    "bytes": 20
+  },
+  {
+    "label": "_reserve0",
+    "slot": "3",
+    "offset": 0,
+    "type": "uint112",
+    "bytes": 14
+  },
+  {
+    "label": "_reserve1",
+    "slot": "3",
+    "offset": 14,
+    "type": "uint112",
+    "bytes": 14
+  },
+  {
+    "label": "_blockTimestampLast",
+    "slot": "3",
+    "offset": 28,
+    "type": "uint32",
+    "bytes": 4
+  },
+  {
+    "label": "price0CumulativeLast",
+    "slot": "4",
+    "offset": 0,
+    "type": "uint256",
+    "bytes": 32
+  },
+  {
+    "label": "price1CumulativeLast",
+    "slot": "5",
+    "offset": 0,
+    "type": "uint256",
+    "bytes": 32
+  },
+  {
+    "label": "kLast",
+    "slot": "6",
+    "offset": 0,
+    "type": "uint256",
+    "bytes": 32
+  },
+  {
+    "label": "__gap",
+    "slot": "7",
+    "offset": 0,
+    "type": "uint256[50]",
+    "bytes": 1600
+  }
+]

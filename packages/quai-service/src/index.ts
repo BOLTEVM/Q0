@@ -1,4 +1,18 @@
-// Quai Network On-chain Service and Analytics client
+// Export registries for tokens and dual-reward farms
+export * from './registries/tokens';
+export * from './registries/farms';
+export * from './registries/pools';
+export * from './registries/qrb';
+export * from './registries/deployed';
+export * from './units';
+export * from './liquidity';
+export * from './qrbStatus';
+export * from './circleswap';
+export * from './pairs';
+export * from './eip1967';
+
+import { findPool, tokenAddress, orientedPath, type SwapRoute, type PoolInfo, POOL_REGISTRY } from './registries/pools';
+import { clampSlippagePct } from './units';
 
 export const CONTRACTS = {
     Q0: '0x00325150094E51107a931980Fdfc3bB1a4C48379',
@@ -10,10 +24,17 @@ export const CONTRACTS = {
     LAPTOP: '0x000B27eDB0ca650059f70103D749F9eD1C3e71be',
     QGIRL: '0x001db8f715a3135e0db0a984dcd64d928dc76702',
     LP_LAPTOP_WQUAI: '0x005935A658E99391786A3Dc6dAA9E8DC7eDDc6c9',
-    LP_LAPTOP_QGIRL: '0x0024cA5876d565097C2f6c48739B0D530BEcbec3'
+    LP_LAPTOP_QGIRL: '0x0024cA5876d565097C2f6c48739B0D530BEcbec3',
+    // BDELTA/WQUAI lives on the Quainance factory (there is no BDELTA/Q0 pool on either DEX)
+    LP_BDELTA_WQUAI: '0x006524c3e3d2197dd61a64fef54f099260387209',
+    // BoltDelta (Dual-Reward Token A)
+    BDELTA: '0x002d4A4fBAC3DF3342eD17FDBa5139818a43B508',
+    // Sovereign 1-of-1 Genesis Qrb
+    QRB: '0x0000000000000000000000000000000000000001'
 };
 
 export const DEFAULT_RPC = 'https://rpc.quai.network/cyprus1';
+const RPC_TIMEOUT_MS = 20_000;
 export const DEFAULT_EXPLORER = 'https://quaiscan.io';
 // New qu.ai Explorer API (https://explorer.qu.ai/api-docs) - richer token/market/DEX endpoints
 export const EXPLORER_V2 = 'https://explorer.qu.ai';
@@ -21,6 +42,8 @@ export const EXPLORER_V2 = 'https://explorer.qu.ai';
 export const QUAINANCE_FACTORY = '0x0018a110b6ca369dcf5ab062c72f049e93b9ede2';
 // Quainance Router — verified deployed, 40 438 bytes of bytecode on Cyprus-1
 export const QUAINANCE_ROUTER = '0x000d6795e06eA4F460CA9572a51741342156305A';
+// Quaiswap Router — router.factory() == the Quaiswap factory that owns the Q0 pools (verified 2026-09-20)
+export const QUAISWAP_ROUTER = '0x006432Ea8c46cBF981f6e710d2439C941CeBe2d0';
 
 // ERC20 function selectors
 export const SELECTORS = {
@@ -165,7 +188,9 @@ export async function quaiRpcCall(method: string, params: any[], rpcUrl: string 
             method,
             params,
             id: Date.now()
-        })
+        }),
+        // A hung node must not freeze the UI or a script forever.
+        signal: AbortSignal.timeout(RPC_TIMEOUT_MS)
     });
     if (!res.ok) {
         throw new Error(`RPC request failed: ${res.statusText}`);
@@ -435,7 +460,7 @@ export function simulateSwap(
     const priceImpact = priceImpactVal.toFixed(2);
 
     // Minimum received = amountOut * (100 - slippage) / 100
-    const slippageFactor = 10000n - BigInt(Math.floor(slippagePct * 100));
+    const slippageFactor = 10000n - BigInt(Math.floor(clampSlippagePct(slippagePct) * 100));
     const minimumReceived = (amountOut * slippageFactor) / 10000n;
 
     return {
@@ -446,3 +471,67 @@ export function simulateSwap(
         executionPrice: executionPrice.toFixed(6)
     };
 }
+
+export interface RouteQuote {
+    amountOut: bigint;
+    minimumReceived: bigint;
+    priceImpactPct: number;
+    /** Output tokens per input token, from the exact amounts. */
+    executionPrice: number;
+}
+
+/**
+ * Quote a multi-hop exact-input swap against live reserves. Each hop is oriented from the pair's
+ * on-chain token0, not from any assumed ordering. Returns null when a hop has no pool or no reserves.
+ * `reservesByPair` is keyed by lower-cased pair address.
+ */
+export function quoteRoute(
+    route: SwapRoute,
+    reversed: boolean,
+    amountIn: bigint,
+    reservesByPair: Record<string, LPReserves | undefined>,
+    slippagePct: number,
+    pools: PoolInfo[] = POOL_REGISTRY
+): RouteQuote | null {
+    if (amountIn <= 0n) return null;
+    const path = orientedPath(route, reversed);
+    let amount = amountIn;
+    let spot = 1;
+
+    for (let i = 0; i < path.length - 1; i++) {
+        const pool = findPool(route.dex, path[i], path[i + 1], pools);
+        const res = pool && reservesByPair[pool.pair.toLowerCase()];
+        if (!pool || !res) return null;
+
+        const inAddr = tokenAddress(path[i]).toLowerCase();
+        const outAddr = tokenAddress(path[i + 1]).toLowerCase();
+        let reserveIn: string, reserveOut: string;
+        if (res.token0.toLowerCase() === inAddr && res.token1.toLowerCase() === outAddr) {
+            reserveIn = res.reserve0; reserveOut = res.reserve1;
+        } else if (res.token1.toLowerCase() === inAddr && res.token0.toLowerCase() === outAddr) {
+            reserveIn = res.reserve1; reserveOut = res.reserve0;
+        } else {
+            return null;
+        }
+
+        const sim = simulateSwap(amount.toString(), reserveIn, reserveOut, 0);
+        amount = BigInt(sim.amountOut);
+        if (amount === 0n) return null;
+        spot *= Number(reserveOut) / Number(reserveIn);
+    }
+
+    const slippageFactor = 10000n - BigInt(Math.floor(clampSlippagePct(slippagePct) * 100));
+    const executionPrice = Number(amount) / Number(amountIn);
+    // Fee is part of the shortfall vs spot, matching how the single-hop simulator reports impact.
+    const priceImpactPct = Math.max(0, (1 - executionPrice / spot) * 100);
+
+    return {
+        amountOut: amount,
+        minimumReceived: (amount * slippageFactor) / 10000n,
+        priceImpactPct,
+        executionPrice
+    };
+}
+
+/** ERC-20 balance of `holder` on any token/LP contract, as base units. */
+export const getLpTokenBalance = getTokenBalance;

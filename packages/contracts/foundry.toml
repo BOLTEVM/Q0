@@ -1,0 +1,39 @@
+# Foundry runs beside Hardhat: same sources, same compiler settings as hardhat.config.ts, so the fuzz and
+# invariant suites exercise the code that ships. Tests live in test/foundry (Hardhat only loads .ts/.js).
+[profile.default]
+src = "contracts"
+test = "test/foundry"
+out = "out"
+cache_path = "cache_forge"
+libs = ["lib"]
+solc_version = "0.8.24"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+remappings = [
+  "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+  "@openzeppelin/contracts-upgradeable/=node_modules/@openzeppelin/contracts-upgradeable/",
+  "forge-std/=lib/forge-std/src/",
+]
+fs_permissions = [{ access = "read", path = "./artifacts/contracts" }]
+bytecode_hash = "none"
+
+[fuzz]
+runs = 1000
+
+[invariant]
+runs = 256
+depth = 64
+fail_on_revert = true
+
+# Deep pass for CI or before a release: `forge test --profile deep`
+[profile.deep.fuzz]
+runs = 20000
+
+[profile.deep.invariant]
+runs = 1024
+depth = 200
+
+[fmt]
+line_length = 120

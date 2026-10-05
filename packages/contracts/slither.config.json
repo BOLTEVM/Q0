@@ -1,0 +1,8 @@
+{
+  "filter_paths": "node_modules|lib/|mocks/|test/",
+  "compile_force_framework": "hardhat",
+  "exclude_informational": false,
+  "exclude_optimization": false,
+  "detectors_to_exclude": "timestamp,naming-convention",
+  "disable_color": true
+}

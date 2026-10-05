@@ -6,10 +6,13 @@
   --panel-border: rgba(255, 255, 255, 0.08);
   --panel-glow: rgba(0, 242, 254, 0.03);
   
-  --primary-glow: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
+  --primary-glow: linear-gradient(135deg, #ff3344 0%, #00f2fe 100%);
+  --accent-plasma: #ff3344;
+  --accent-plasma-glow: rgba(255, 51, 68, 0.4);
   --accent-neon: #00f2fe;
   --accent-violet: #8a2be2;
   --accent-gold: #ffd700;
+  --accent-amber: #f59e0b;
   
   --text-main: #f3f4f6;
   --text-muted: #9ca3af;
@@ -694,4 +697,327 @@ tr:hover td {
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
+}
+
+/* ==========================================================================
+   Circleswap Protocol Navigation & Brand Enhancements
+   ========================================================================== */
+
+.circleswap-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  background: rgba(18, 22, 41, 0.7);
+  border: 1px solid var(--panel-border);
+  padding: 0.4rem;
+  border-radius: 9999px;
+  backdrop-filter: blur(16px);
+  margin-bottom: 2rem;
+  max-width: 680px;
+  margin-left: auto;
+  margin-right: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.circleswap-nav-btn {
+  font-family: var(--font-display);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.25rem;
+  border-radius: 9999px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  white-space: nowrap;
+}
+
+.circleswap-nav-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.circleswap-nav-btn.active {
+  color: #fff;
+  background: linear-gradient(135deg, rgba(255, 51, 68, 0.25) 0%, rgba(138, 43, 226, 0.3) 100%);
+  border-color: rgba(255, 51, 68, 0.4);
+  box-shadow: 0 0 16px rgba(255, 51, 68, 0.25);
+}
+
+/* Portfolio Asset Bar */
+.portfolio-ticker {
+  display: flex;
+  gap: 0.75rem;
+  overflow-x: auto;
+  padding: 0.75rem 0.5rem 1.25rem 0.5rem;
+  margin-bottom: 1.5rem;
+  scrollbar-width: thin;
+}
+
+.portfolio-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(18, 22, 41, 0.6);
+  border: 1px solid var(--panel-border);
+  padding: 0.4rem 0.8rem;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+  transition: border-color 0.2s;
+}
+
+.portfolio-chip:hover {
+  border-color: rgba(0, 242, 254, 0.3);
+}
+
+.portfolio-chip-symbol {
+  font-weight: 800;
+  color: var(--accent-neon);
+}
+
+.portfolio-chip-balance {
+  color: #fff;
+  font-family: monospace;
+}
+
+/* ==========================================================================
+   Farms & Pools Grid Styles
+   ========================================================================== */
+
+.farms-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2.5rem;
+}
+
+.farm-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border-radius: 18px;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  padding: 1.5rem;
+  transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.farm-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(255, 51, 68, 0.3);
+  box-shadow: 0 12px 36px rgba(255, 51, 68, 0.08);
+}
+
+.farm-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.25rem;
+}
+
+.farm-title-group h3 {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 0.25rem;
+}
+
+.farm-dual-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: linear-gradient(90deg, rgba(255, 51, 68, 0.15), rgba(0, 242, 254, 0.15));
+  border: 1px solid rgba(255, 51, 68, 0.3);
+  padding: 0.25rem 0.55rem;
+  border-radius: 9999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--accent-plasma);
+  letter-spacing: 0.5px;
+}
+
+.farm-multiplier-badge {
+  background: rgba(255, 215, 0, 0.12);
+  border: 1px solid rgba(255, 215, 0, 0.25);
+  color: var(--accent-gold);
+  padding: 0.25rem 0.6rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.farm-metrics-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 0.75rem;
+  border-radius: 12px;
+}
+
+.farm-metric-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-bottom: 0.2rem;
+}
+
+.farm-metric-val {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: #fff;
+}
+
+.farm-apr-highlight {
+  color: var(--success);
+  text-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+}
+
+.farm-rewards-panel {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  padding: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.farm-rewards-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.farm-rewards-row:last-child {
+  margin-bottom: 0;
+}
+
+.reward-token-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.reward-token-val {
+  font-family: monospace;
+  font-weight: 700;
+  color: var(--accent-neon);
+}
+
+.farm-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* ==========================================================================
+   Qrb 1-of-1 Genesis Sovereign Portal Styles
+   ========================================================================== */
+
+.qrb-hero-container {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2.5rem;
+  align-items: center;
+  background: radial-gradient(circle at 50% 50%, rgba(255, 51, 68, 0.08) 0%, rgba(18, 22, 41, 0.85) 70%);
+  border: 1px solid rgba(255, 51, 68, 0.25);
+  border-radius: 24px;
+  padding: 2.5rem;
+  margin-bottom: 3rem;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5), inset 0 0 40px rgba(255, 51, 68, 0.05);
+  position: relative;
+  overflow: hidden;
+}
+
+@media (min-width: 960px) {
+  .qrb-hero-container {
+    grid-template-columns: 1.1fr 1fr;
+  }
+}
+
+.qrb-artwork-pod {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qrb-gif-viewport {
+  width: 100%;
+  max-width: 440px;
+  border-radius: 20px;
+  border: 2px solid rgba(255, 51, 68, 0.5);
+  box-shadow: 0 0 35px rgba(255, 51, 68, 0.4), inset 0 0 20px rgba(0, 0, 0, 0.8);
+  overflow: hidden;
+  position: relative;
+  background: #000;
+}
+
+.qrb-gif-viewport img {
+  width: 100%;
+  height: auto;
+  display: block;
+  filter: contrast(1.05) brightness(1.02);
+}
+
+.qrb-spec-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.qrb-supply-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(255, 51, 68, 0.15);
+  border: 1px solid var(--accent-plasma);
+  padding: 0.4rem 0.9rem;
+  border-radius: 9999px;
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: #fff;
+  width: fit-content;
+  letter-spacing: 0.5px;
+  box-shadow: 0 0 12px rgba(255, 51, 68, 0.3);
+}
+
+.qrb-traits-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.qrb-trait-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 0.75rem;
+  border-radius: 12px;
+}
+
+.qrb-trait-name {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.2rem;
+}
+
+.qrb-trait-val {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-main);
 }

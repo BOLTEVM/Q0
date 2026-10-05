@@ -1,0 +1,4 @@
+'npx hardhat clean' running (wd: C:\Users\wonfi\Documents\boltevm_multimedia_mine_suite\q0\packages\contracts)
+'npx hardhat clean --global' running (wd: C:\Users\wonfi\Documents\boltevm_multimedia_mine_suite\q0\packages\contracts)
+'npx hardhat compile --force' running (wd: C:\Users\wonfi\Documents\boltevm_multimedia_mine_suite\q0\packages\contracts)
+. analyzed (76 contracts with 100 detectors), 0 result(s) found

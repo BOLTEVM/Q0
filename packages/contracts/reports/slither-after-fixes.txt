@@ -1,0 +1,226 @@
+'npx hardhat clean' running (wd: C:\Users\wonfi\Documents\boltevm_multimedia_mine_suite\q0\packages\contracts)
+'npx hardhat clean --global' running (wd: C:\Users\wonfi\Documents\boltevm_multimedia_mine_suite\q0\packages\contracts)
+'npx hardhat compile --force' running (wd: C:\Users\wonfi\Documents\boltevm_multimedia_mine_suite\q0\packages\contracts)
+
+Detector: divide-before-multiply
+CircleswapPair._update(uint256,uint256,uint112,uint112) (contracts/amm/CircleswapPair.sol#214-229) performs a multiplication on the result of a division:
+	- price0CumulativeLast += ((uint256(oldReserve1) << 112) / oldReserve0) * elapsed (contracts/amm/CircleswapPair.sol#221)
+CircleswapPair._update(uint256,uint256,uint112,uint112) (contracts/amm/CircleswapPair.sol#214-229) performs a multiplication on the result of a division:
+	- price1CumulativeLast += ((uint256(oldReserve0) << 112) / oldReserve1) * elapsed (contracts/amm/CircleswapPair.sol#222)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#divide-before-multiply
+
+Detector: incorrect-equality
+CircleswapMasterChef.updatePool(uint256) (contracts/CircleswapMasterChef.sol#207-221) uses a dangerous strict equality:
+	- lpSupply == 0 || totalAllocPoint == 0 (contracts/CircleswapMasterChef.sol#213)
+Qrb.boostEligibleAt(address) (contracts/Qrb.sol#102-105) uses a dangerous strict equality:
+	- since == 0 (contracts/Qrb.sol#104)
+CircleswapPair.burn(address) (contracts/amm/CircleswapPair.sol#134-157) uses a dangerous strict equality:
+	- amount0 == 0 || amount1 == 0 (contracts/amm/CircleswapPair.sol#146)
+CircleswapPair.mint(address) (contracts/amm/CircleswapPair.sol#108-131) uses a dangerous strict equality:
+	- supply == 0 (contracts/amm/CircleswapPair.sol#117)
+CircleswapPair.mint(address) (contracts/amm/CircleswapPair.sol#108-131) uses a dangerous strict equality:
+	- liquidity == 0 (contracts/amm/CircleswapPair.sol#125)
+CircleswapPair.swap(uint256,uint256,address,bytes) (contracts/amm/CircleswapPair.sol#162-195) uses a dangerous strict equality:
+	- amount0In == 0 && amount1In == 0 (contracts/amm/CircleswapPair.sol#186)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+
+Detector: reentrancy-no-eth
+Reentrancy in CircleswapPair.swap(uint256,uint256,address,bytes) (contracts/amm/CircleswapPair.sol#162-195):
+	External calls:
+	- ICircleswapCallee(to).circleswapCall(msg.sender,amount0Out,amount1Out,data) (contracts/amm/CircleswapPair.sol#178)
+	State variables written after the call(s):
+	- _update(balance0,balance1,reserve0,reserve1) (contracts/amm/CircleswapPair.sol#193)
+		- _blockTimestampLast = timestamp (contracts/amm/CircleswapPair.sol#227)
+	CircleswapPair._blockTimestampLast (contracts/amm/CircleswapPair.sol#59) can be used in cross function reentrancies:
+	- CircleswapPair.getReserves() (contracts/amm/CircleswapPair.sol#101-103)
+	- _update(balance0,balance1,reserve0,reserve1) (contracts/amm/CircleswapPair.sol#193)
+		- _reserve0 = uint112(balance0) (contracts/amm/CircleswapPair.sol#225)
+	CircleswapPair._reserve0 (contracts/amm/CircleswapPair.sol#57) can be used in cross function reentrancies:
+	- CircleswapPair.getReserves() (contracts/amm/CircleswapPair.sol#101-103)
+	- _update(balance0,balance1,reserve0,reserve1) (contracts/amm/CircleswapPair.sol#193)
+		- _reserve1 = uint112(balance1) (contracts/amm/CircleswapPair.sol#226)
+	CircleswapPair._reserve1 (contracts/amm/CircleswapPair.sol#58) can be used in cross function reentrancies:
+	- CircleswapPair.getReserves() (contracts/amm/CircleswapPair.sol#101-103)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-2
+
+Detector: unused-return
+CircleswapMasterChef.constructor(address,IERC20,IERC20,IQrbBoost,uint256,uint256) (contracts/CircleswapMasterChef.sol#113-135) ignores return value by _qrb.BOOST_BPS() (contracts/CircleswapMasterChef.sol#128)
+QrbArtifactNFT.constructor(address,address,string,IQrbBoost) (contracts/QrbArtifactNFT.sol#50-63) ignores return value by qrb_.BOOST_BPS() (contracts/QrbArtifactNFT.sol#57)
+QrbArtifactNFT.constructor(address,address,string,IQrbBoost) (contracts/QrbArtifactNFT.sol#50-63) ignores return value by qrb_.BOOST_THRESHOLD() (contracts/QrbArtifactNFT.sol#58)
+QrbArtifactNFT.constructor(address,address,string,IQrbBoost) (contracts/QrbArtifactNFT.sol#50-63) ignores return value by qrb_.BOOST_MATURITY() (contracts/QrbArtifactNFT.sol#59)
+CircleswapRouter._addLiquidity(address,address,uint256,uint256,uint256,uint256) (contracts/amm/CircleswapRouter.sol#307-332) ignores return value by f.createPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#316)
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) ignores return value by (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#unused-return
+
+Detector: missing-zero-check
+CircleswapFactory.setFeeTo(address).newFeeTo (contracts/amm/CircleswapFactory.sol#73) lacks a zero-check on :
+		- feeTo = newFeeTo (contracts/amm/CircleswapFactory.sol#75)
+CircleswapPair.initialize(address,address).token0_ (contracts/amm/CircleswapPair.sol#93) lacks a zero-check on :
+		- token0 = token0_ (contracts/amm/CircleswapPair.sol#96)
+CircleswapPair.initialize(address,address).token1_ (contracts/amm/CircleswapPair.sol#93) lacks a zero-check on :
+		- token1 = token1_ (contracts/amm/CircleswapPair.sol#97)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#missing-zero-address-validation
+
+Detector: calls-loop
+CircleswapRouter._pair(address,address) (contracts/amm/CircleswapRouter.sol#394-397) has external calls inside a loop: pair = ICircleswapFactory(factory).getPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#395)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactTokensForTokens(uint256,uint256,address[],address,uint256)
+		CircleswapRouter._amountsOut(uint256,address[])
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) has external calls inside a loop: (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactTokensForTokens(uint256,uint256,address[],address,uint256)
+		CircleswapRouter._amountsOut(uint256,address[])
+CircleswapRouter._swap(uint256[],address[],address[],address) (contracts/amm/CircleswapRouter.sol#351-359) has external calls inside a loop: ICircleswapPair(pairs[i]).swap(amount0Out,amount1Out,recipient,new bytes(0)) (contracts/amm/CircleswapRouter.sol#357)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactTokensForTokens(uint256,uint256,address[],address,uint256)
+CircleswapRouter._pair(address,address) (contracts/amm/CircleswapRouter.sol#394-397) has external calls inside a loop: pair = ICircleswapFactory(factory).getPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#395)
+	Calls stack containing the loop:
+		CircleswapRouter.swapTokensForExactTokens(uint256,uint256,address[],address,uint256)
+		CircleswapRouter._amountsIn(uint256,address[])
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) has external calls inside a loop: (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+	Calls stack containing the loop:
+		CircleswapRouter.swapTokensForExactTokens(uint256,uint256,address[],address,uint256)
+		CircleswapRouter._amountsIn(uint256,address[])
+CircleswapRouter._swap(uint256[],address[],address[],address) (contracts/amm/CircleswapRouter.sol#351-359) has external calls inside a loop: ICircleswapPair(pairs[i]).swap(amount0Out,amount1Out,recipient,new bytes(0)) (contracts/amm/CircleswapRouter.sol#357)
+	Calls stack containing the loop:
+		CircleswapRouter.swapTokensForExactTokens(uint256,uint256,address[],address,uint256)
+CircleswapRouter._pair(address,address) (contracts/amm/CircleswapRouter.sol#394-397) has external calls inside a loop: pair = ICircleswapFactory(factory).getPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#395)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactETHForTokens(uint256,address[],address,uint256)
+		CircleswapRouter._amountsOut(uint256,address[])
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) has external calls inside a loop: (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactETHForTokens(uint256,address[],address,uint256)
+		CircleswapRouter._amountsOut(uint256,address[])
+CircleswapRouter._swap(uint256[],address[],address[],address) (contracts/amm/CircleswapRouter.sol#351-359) has external calls inside a loop: ICircleswapPair(pairs[i]).swap(amount0Out,amount1Out,recipient,new bytes(0)) (contracts/amm/CircleswapRouter.sol#357)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactETHForTokens(uint256,address[],address,uint256)
+CircleswapRouter._pair(address,address) (contracts/amm/CircleswapRouter.sol#394-397) has external calls inside a loop: pair = ICircleswapFactory(factory).getPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#395)
+	Calls stack containing the loop:
+		CircleswapRouter.swapTokensForExactETH(uint256,uint256,address[],address,uint256)
+		CircleswapRouter._amountsIn(uint256,address[])
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) has external calls inside a loop: (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+	Calls stack containing the loop:
+		CircleswapRouter.swapTokensForExactETH(uint256,uint256,address[],address,uint256)
+		CircleswapRouter._amountsIn(uint256,address[])
+CircleswapRouter._swap(uint256[],address[],address[],address) (contracts/amm/CircleswapRouter.sol#351-359) has external calls inside a loop: ICircleswapPair(pairs[i]).swap(amount0Out,amount1Out,recipient,new bytes(0)) (contracts/amm/CircleswapRouter.sol#357)
+	Calls stack containing the loop:
+		CircleswapRouter.swapTokensForExactETH(uint256,uint256,address[],address,uint256)
+CircleswapRouter._pair(address,address) (contracts/amm/CircleswapRouter.sol#394-397) has external calls inside a loop: pair = ICircleswapFactory(factory).getPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#395)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactTokensForETH(uint256,uint256,address[],address,uint256)
+		CircleswapRouter._amountsOut(uint256,address[])
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) has external calls inside a loop: (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactTokensForETH(uint256,uint256,address[],address,uint256)
+		CircleswapRouter._amountsOut(uint256,address[])
+CircleswapRouter._swap(uint256[],address[],address[],address) (contracts/amm/CircleswapRouter.sol#351-359) has external calls inside a loop: ICircleswapPair(pairs[i]).swap(amount0Out,amount1Out,recipient,new bytes(0)) (contracts/amm/CircleswapRouter.sol#357)
+	Calls stack containing the loop:
+		CircleswapRouter.swapExactTokensForETH(uint256,uint256,address[],address,uint256)
+CircleswapRouter._pair(address,address) (contracts/amm/CircleswapRouter.sol#394-397) has external calls inside a loop: pair = ICircleswapFactory(factory).getPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#395)
+	Calls stack containing the loop:
+		CircleswapRouter.swapETHForExactTokens(uint256,address[],address,uint256)
+		CircleswapRouter._amountsIn(uint256,address[])
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) has external calls inside a loop: (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+	Calls stack containing the loop:
+		CircleswapRouter.swapETHForExactTokens(uint256,address[],address,uint256)
+		CircleswapRouter._amountsIn(uint256,address[])
+CircleswapRouter._swap(uint256[],address[],address[],address) (contracts/amm/CircleswapRouter.sol#351-359) has external calls inside a loop: ICircleswapPair(pairs[i]).swap(amount0Out,amount1Out,recipient,new bytes(0)) (contracts/amm/CircleswapRouter.sol#357)
+	Calls stack containing the loop:
+		CircleswapRouter.swapETHForExactTokens(uint256,address[],address,uint256)
+CircleswapRouter._pair(address,address) (contracts/amm/CircleswapRouter.sol#394-397) has external calls inside a loop: pair = ICircleswapFactory(factory).getPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#395)
+	Calls stack containing the loop:
+		CircleswapRouter.getAmountsOut(uint256,address[])
+		CircleswapRouter._amountsOut(uint256,address[])
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) has external calls inside a loop: (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+	Calls stack containing the loop:
+		CircleswapRouter.getAmountsOut(uint256,address[])
+		CircleswapRouter._amountsOut(uint256,address[])
+CircleswapRouter._pair(address,address) (contracts/amm/CircleswapRouter.sol#394-397) has external calls inside a loop: pair = ICircleswapFactory(factory).getPair(tokenA,tokenB) (contracts/amm/CircleswapRouter.sol#395)
+	Calls stack containing the loop:
+		CircleswapRouter.getAmountsIn(uint256,address[])
+		CircleswapRouter._amountsIn(uint256,address[])
+CircleswapRouter._pairReserves(address,address,address) (contracts/amm/CircleswapRouter.sol#407-410) has external calls inside a loop: (reserve0,reserve1,None) = ICircleswapPair(pair).getReserves() (contracts/amm/CircleswapRouter.sol#408)
+	Calls stack containing the loop:
+		CircleswapRouter.getAmountsIn(uint256,address[])
+		CircleswapRouter._amountsIn(uint256,address[])
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation/#calls-inside-a-loop
+
+Detector: reentrancy-benign
+Reentrancy in CircleswapPair.swap(uint256,uint256,address,bytes) (contracts/amm/CircleswapPair.sol#162-195):
+	External calls:
+	- ICircleswapCallee(to).circleswapCall(msg.sender,amount0Out,amount1Out,data) (contracts/amm/CircleswapPair.sol#178)
+	State variables written after the call(s):
+	- _update(balance0,balance1,reserve0,reserve1) (contracts/amm/CircleswapPair.sol#193)
+		- price0CumulativeLast += ((uint256(oldReserve1) << 112) / oldReserve0) * elapsed (contracts/amm/CircleswapPair.sol#221)
+	- _update(balance0,balance1,reserve0,reserve1) (contracts/amm/CircleswapPair.sol#193)
+		- price1CumulativeLast += ((uint256(oldReserve0) << 112) / oldReserve1) * elapsed (contracts/amm/CircleswapPair.sol#222)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-3
+
+Detector: reentrancy-events
+Reentrancy in CircleswapFactory.createPair(address,address) (contracts/amm/CircleswapFactory.sol#53-70):
+	External calls:
+	- ICircleswapPair(pair).initialize(token0,token1) (contracts/amm/CircleswapFactory.sol#68)
+	Event emitted after the call(s):
+	- PairCreated(token0,token1,pair,allPairs.length) (contracts/amm/CircleswapFactory.sol#69)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-4
+
+Detector: timestamp
+CircleswapMasterChef.pendingRewards(uint256,address) (contracts/CircleswapMasterChef.sol#173-198) uses timestamp for comparisons
+	Dangerous comparisons:
+	- pid >= poolInfo.length (contracts/CircleswapMasterChef.sol#174)
+	- block.timestamp > pool.lastRewardTime && lpSupply != 0 && totalAllocPoint > 0 (contracts/CircleswapMasterChef.sol#182)
+CircleswapMasterChef.massUpdatePools() (contracts/CircleswapMasterChef.sol#200-205) uses timestamp for comparisons
+	Dangerous comparisons:
+	- pid < length (contracts/CircleswapMasterChef.sol#202)
+CircleswapMasterChef.updatePool(uint256) (contracts/CircleswapMasterChef.sol#207-221) uses timestamp for comparisons
+	Dangerous comparisons:
+	- pid >= poolInfo.length (contracts/CircleswapMasterChef.sol#208)
+	- block.timestamp <= pool.lastRewardTime (contracts/CircleswapMasterChef.sol#210)
+	- lpSupply == 0 || totalAllocPoint == 0 (contracts/CircleswapMasterChef.sol#213)
+Qrb.boostBpsOf(address) (contracts/Qrb.sol#94-98) uses timestamp for comparisons
+	Dangerous comparisons:
+	- matured = since != 0 && block.timestamp >= since + BOOST_MATURITY (contracts/Qrb.sol#96)
+	- matured && balanceOf(account) >= BOOST_THRESHOLD (contracts/Qrb.sol#97)
+Qrb.boostEligibleAt(address) (contracts/Qrb.sol#102-105) uses timestamp for comparisons
+	Dangerous comparisons:
+	- since == 0 (contracts/Qrb.sol#104)
+CircleswapPair.mint(address) (contracts/amm/CircleswapPair.sol#108-131) uses timestamp for comparisons
+	Dangerous comparisons:
+	- supply == 0 (contracts/amm/CircleswapPair.sol#117)
+	- initial <= MINIMUM_LIQUIDITY (contracts/amm/CircleswapPair.sol#119)
+	- liquidity == 0 (contracts/amm/CircleswapPair.sol#125)
+CircleswapPair.burn(address) (contracts/amm/CircleswapPair.sol#134-157) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount0 == 0 || amount1 == 0 (contracts/amm/CircleswapPair.sol#146)
+CircleswapPair.swap(uint256,uint256,address,bytes) (contracts/amm/CircleswapPair.sol#162-195) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount0Out >= reserve0 || amount1Out >= reserve1 (contracts/amm/CircleswapPair.sol#169)
+	- amount0In == 0 && amount1In == 0 (contracts/amm/CircleswapPair.sol#186)
+	- adjusted0 * adjusted1 < uint256(reserve0) * uint256(reserve1) * 1_000_000 (contracts/amm/CircleswapPair.sol#191)
+	- balance0 > reserve0 - amount0Out (contracts/amm/CircleswapPair.sol#184)
+	- balance1 > reserve1 - amount1Out (contracts/amm/CircleswapPair.sol#185)
+CircleswapPair._update(uint256,uint256,uint112,uint112) (contracts/amm/CircleswapPair.sol#214-229) uses timestamp for comparisons
+	Dangerous comparisons:
+	- elapsed > 0 && oldReserve0 != 0 && oldReserve1 != 0 (contracts/amm/CircleswapPair.sol#219)
+CircleswapPair._mintProtocolFee(uint112,uint112) (contracts/amm/CircleswapPair.sol#234-250) uses timestamp for comparisons
+	Dangerous comparisons:
+	- rootK > rootLastK (contracts/amm/CircleswapPair.sol#242)
+	- shares > 0 (contracts/amm/CircleswapPair.sol#244)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+
+Detector: low-level-calls
+Low level call in CircleswapRouter._sendNative(address,uint256) (contracts/amm/CircleswapRouter.sol#424-427):
+	- (ok,None) = to.call{value: amount}() (contracts/amm/CircleswapRouter.sol#425)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#low-level-calls
+
+Detector: naming-convention
+Parameter CircleswapMasterChef.setEmissionRates(uint256,uint256)._rewardAPerSecond (contracts/CircleswapMasterChef.sol#302) is not in mixedCase
+Parameter CircleswapMasterChef.setEmissionRates(uint256,uint256)._rewardBPerSecond (contracts/CircleswapMasterChef.sol#302) is not in mixedCase
+Variable CircleswapRouter.WETH (contracts/amm/CircleswapRouter.sol#34) is not in mixedCase
+Function ICircleswapPair.MINIMUM_LIQUIDITY() (contracts/amm/interfaces/ICircleswapPair.sol#22) is not in mixedCase
+Function IQrbBoost.BOOST_BPS() (contracts/interfaces/IQrbBoost.sol#13) is not in mixedCase
+Function IQrbBoost.BOOST_THRESHOLD() (contracts/interfaces/IQrbBoost.sol#16) is not in mixedCase
+Function IQrbBoost.BOOST_MATURITY() (contracts/interfaces/IQrbBoost.sol#21) is not in mixedCase
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#conformance-to-solidity-naming-conventions
+. analyzed (76 contracts with 102 detectors), 60 result(s) found

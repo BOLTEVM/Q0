@@ -1,0 +1,145 @@
+No files changed, compilation skipped
+
+Ran 5 tests for test/foundry/Qrb.t.sol:QrbBoostTest
+[PASS] testFuzz_boostStartsExactlyAtMaturity(uint256,uint256) (runs: 20000, μ: 139007, ~: 139694)
+[PASS] testFuzz_borrowedBalanceNeverBoosts(uint256) (runs: 20000, μ: 165848, ~: 158129)
+[PASS] testFuzz_dipResetsClock_topUpDoesNot(uint256) (runs: 20000, μ: 371971, ~: 372032)
+[PASS] testFuzz_strangerCannotResetClock(uint256) (runs: 20000, μ: 235857, ~: 235945)
+[PASS] test_supplyIsFixedAndMintIsOnce() (gas: 116615)
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 200.23s (59.85s CPU time)
+
+Ran 3 tests for test/foundry/MasterChefPrecision.t.sol:MasterChefPrecisionTest
+[PASS] testFuzz_precision_boundedLoss(uint256,uint256,uint256) (runs: 20000, μ: 20134236, ~: 1745743)
+[PASS] test_precision_largeSupplySmallEmission() (gas: 897461144)
+[PASS] test_precision_typical_lossIsNegligible() (gas: 897355076)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 200.82s (204.44s CPU time)
+
+Ran 15 tests for test/foundry/AmmFuzz.t.sol:AmmFuzzTest
+[PASS] testFuzz_createPair_symmetricAndUnique(bool) (runs: 20000, μ: 353120, ~: 353110)
+[PASS] testFuzz_flashSwap_needsRepayment(uint256,uint256) (runs: 20000, μ: 1194260, ~: 1194163)
+[PASS] testFuzz_inflationAttackIsUnprofitable(uint256,uint256,uint256) (runs: 20000, μ: 1279963, ~: 1315049)
+[PASS] testFuzz_inflationAttackIsUnprofitable_targeted(uint256,uint256,uint256) (runs: 20000, μ: 1318959, ~: 1319106)
+[PASS] testFuzz_liquidityRoundTripNeverProfits(uint256,uint256,uint256,uint256) (runs: 20000, μ: 1208771, ~: 1242580)
+[PASS] testFuzz_multiHop_routerKeepsNothing(uint256,uint256,bool) (runs: 20000, μ: 1688988, ~: 1690989)
+[PASS] testFuzz_native_refundsAndSettles(uint256,uint256,uint256) (runs: 20000, μ: 1019217, ~: 1025705)
+[PASS] testFuzz_permit_worksOnCloneAndCannotCrossPools(uint256,uint256) (runs: 20000, μ: 692899, ~: 693075)
+[PASS] testFuzz_swapExactIn_kNeverFalls_paysQuote(uint256,uint256,uint256,bool) (runs: 20000, μ: 999183, ~: 1009200)
+[PASS] testFuzz_swapExactOut_deliversExactly_kNeverFalls(uint256,uint256,uint256,bool) (runs: 20000, μ: 1002331, ~: 1002370)
+[PASS] testFuzz_swapRoundTripNeverProfits(uint256,uint256,uint256) (runs: 20000, μ: 1129845, ~: 1150323)
+[PASS] test_createPair_refusesNonContractsAndZero() (gas: 60181)
+[PASS] test_feeToIsOwnerOnly_andOwnershipIsTwoStep() (gas: 128432)
+[PASS] test_inflationAttackWithManyVictimsIsUnprofitable() (gas: 159288294)
+[PASS] test_pairImplementationIsLocked_cloneInitialisesOnce() (gas: 340473)
+Suite result: ok. 15 passed; 0 failed; 0 skipped; finished in 200.82s (911.70s CPU time)
+
+Ran 7 tests for test/foundry/MasterChefBehavior.t.sol:MasterChefBehaviorTest
+[PASS] testFuzz_allocationChangeDoesNotRewriteHistory(uint256,uint256) (runs: 20000, μ: 712654, ~: 712666)
+[PASS] testFuzz_boostIsCappedAtDouble(uint256,uint256,uint256) (runs: 20000, μ: 911029, ~: 911371)
+[PASS] testFuzz_emissionIsSharedProportionallyAndFullyPaid(uint256,uint256,uint256) (runs: 20000, μ: 714223, ~: 714213)
+[PASS] testFuzz_shortfallIsOwedAndPaidAfterRefill(uint256,uint256) (runs: 20000, μ: 973385, ~: 973443)
+[PASS] testFuzz_singleAssetPoolNeverPaysFromPrincipal(uint256,uint256) (runs: 20000, μ: 763060, ~: 763125)
+[PASS] testFuzz_unpaidIsNotBoostedTwice(uint256) (runs: 20000, μ: 985394, ~: 985491)
+[PASS] test_revertingBoostSourceDoesNotBlockHarvest() (gas: 797832)
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 200.82s (638.84s CPU time)
+
+Ran 7 tests for test/foundry/Qrb.t.sol:QrbLibrariesFuzzTest
+[PASS] testFuzz_amount18_roundTrips(uint256) (runs: 20000, μ: 47708, ~: 42593)
+[PASS] testFuzz_duration_wholeDays(uint256) (runs: 20000, μ: 17035, ~: 17261)
+[PASS] testFuzz_isValid_acceptsWellFormed(uint256,bool) (runs: 20000, μ: 56787, ~: 55603)
+[PASS] testFuzz_isValid_neverReverts(string) (runs: 20000, μ: 7588, ~: 7626)
+[PASS] testFuzz_isValid_rejectsAnyBadByteOrLength(uint256,uint256,uint8,uint256) (runs: 20000, μ: 110866, ~: 110702)
+[PASS] testFuzz_pct_roundTrips(uint256) (runs: 20000, μ: 23012, ~: 24379)
+[PASS] test_isValid_rejectsOtherHostsAndSchemes() (gas: 95287)
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 200.82s (258.70s CPU time)
+
+Ran 1 test for test/foundry/Qrb.t.sol:QrbBoostInvariantTest
+[PASS]
+QrbBoostInvariantTest invariants:
+[PASS] invariant_boostMatchesContinuousHolding
+[PASS] invariant_supplyNeverExceedsMax
+ QrbBoostInvariantTest invariants (runs: 1024, calls: 204800, reverts: 0)
+
+╭------------+----------+-------+---------+----------╮
+| Contract   | Selector | Calls | Reverts | Discards |
++====================================================+
+| QrbHandler | burn     | 68039 | 0       | 0        |
+|------------+----------+-------+---------+----------|
+| QrbHandler | transfer | 68220 | 0       | 0        |
+|------------+----------+-------+---------+----------|
+| QrbHandler | warp     | 68541 | 0       | 0        |
+╰------------+----------+-------+---------+----------╯
+
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 227.28s (227.28s CPU time)
+
+Ran 1 test for test/foundry/AmmInvariant.t.sol:AmmInvariantTest
+[PASS]
+AmmInvariantTest invariants:
+[PASS] invariant_lpSupplyIsFullyAccounted
+[PASS] invariant_minimumLiquidityLocked
+[PASS] invariant_poolsAreSolvent
+[PASS] invariant_routerHoldsNothing
+[PASS] invariant_tokensConserved
+ AmmInvariantTest invariants (runs: 1024, calls: 204800, reverts: 0)
+
+╭------------+-----------------+-------+---------+----------╮
+| Contract   | Selector        | Calls | Reverts | Discards |
++===========================================================+
+| AmmHandler | addLiquidity    | 25531 | 0       | 0        |
+|------------+-----------------+-------+---------+----------|
+| AmmHandler | donate          | 25748 | 0       | 0        |
+|------------+-----------------+-------+---------+----------|
+| AmmHandler | removeLiquidity | 25672 | 0       | 0        |
+|------------+-----------------+-------+---------+----------|
+| AmmHandler | swapExactIn     | 25685 | 0       | 0        |
+|------------+-----------------+-------+---------+----------|
+| AmmHandler | swapExactOut    | 25399 | 0       | 0        |
+|------------+-----------------+-------+---------+----------|
+| AmmHandler | swapTwoHops     | 25579 | 0       | 0        |
+|------------+-----------------+-------+---------+----------|
+| AmmHandler | toggleFee       | 25519 | 0       | 0        |
+|------------+-----------------+-------+---------+----------|
+| AmmHandler | warp            | 25667 | 0       | 0        |
+╰------------+-----------------+-------+---------+----------╯
+
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 687.38s (687.36s CPU time)
+
+Ran 1 test for test/foundry/MasterChefInvariant.t.sol:MasterChefInvariantTest
+[PASS]
+MasterChefInvariantTest invariants:
+[PASS] invariant_neverOverDistributes
+[PASS] invariant_principalAlwaysBacked
+[PASS] invariant_stakeAccounting
+ MasterChefInvariantTest invariants (runs: 1024, calls: 204800, reverts: 0)
+
+╭-------------+-------------------+-------+---------+----------╮
+| Contract    | Selector          | Calls | Reverts | Discards |
++==============================================================+
+| FarmHandler | addPool           | 17209 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | deposit           | 17095 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | donate            | 17024 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | emergencyWithdraw | 16875 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | harvest           | 17272 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | refill            | 17134 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | setBoost          | 17199 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | setPool           | 16986 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | setRates          | 16837 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | togglePause       | 17062 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | warp              | 16904 | 0       | 0        |
+|-------------+-------------------+-------+---------+----------|
+| FarmHandler | withdraw          | 17203 | 0       | 0        |
+╰-------------+-------------------+-------+---------+----------╯
+
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 826.96s (826.95s CPU time)
+
+Ran 8 test suites in 826.97s (2745.13s CPU time): 40 tests passed, 0 failed, 0 skipped (40 total tests)
+exit=0
