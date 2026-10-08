@@ -2,7 +2,7 @@
 // the whole delay, then executed (by anyone) or cancelled. This module builds those transactions and reads the
 // queue back from the chain; the Governance modal signs them in the user's wallet.
 
-import { AbiCoder, keccak256, ZeroHash } from 'quais';
+import { AbiCoder, id as hashOfText, keccak256, ZeroHash } from 'quais';
 import { checksum, interfaceOf, isCyprus1QuaiAddress } from './chain';
 import type { Reader } from './flows';
 
@@ -24,6 +24,14 @@ export interface GovTargets {
     router: string | null;
     timelock: string;
 }
+
+/** The three roles a timelock account can hold. A proposer queues; a canceller vetoes; an executor runs a ready operation. */
+export type TimelockRole = 'proposer' | 'canceller' | 'executor';
+export const TIMELOCK_ROLES: Record<TimelockRole, string> = {
+    proposer: hashOfText('PROPOSER_ROLE'),
+    canceller: hashOfText('CANCELLER_ROLE'),
+    executor: hashOfText('EXECUTOR_ROLE')
+};
 
 const need = (what: string, a: string) => {
     let sum: string;
@@ -119,6 +127,36 @@ export const OPS = {
             risk: 'irreversible',
             target: t.router,
             data: interfaceOf('CircleswapRouter').encodeFunctionData('renounceOwnership')
+        };
+    },
+    grantRole(t: GovTargets, role: TimelockRole, account: string): GovOp {
+        const who = need('Account', account);
+        const text: Record<TimelockRole, string> = {
+            proposer: 'It will be able to QUEUE owner actions (upgrades, fee changes, freezes). Give it only to an account you would trust with that, such as a multisig. It does not make the account a canceller: grant that separately.',
+            canceller: 'It will be able to CANCEL a queued operation (a veto) but not queue or run one. A second key kept apart from the proposer is the defence against a compromised proposer. It can also cancel legitimate operations, so name only an account you trust.',
+            executor: 'It will be able to RUN an operation once its delay has passed. Execution is already open to anyone unless it was closed at deployment.'
+        };
+        return {
+            id: 'grantRole',
+            label: `Give the ${role} role to ${who}`,
+            description: text[role],
+            risk: 'sensitive',
+            target: t.timelock,
+            data: interfaceOf('CircleswapTimelock').encodeFunctionData('grantRole', [TIMELOCK_ROLES[role], who])
+        };
+    },
+    revokeRole(t: GovTargets, role: TimelockRole, account: string): GovOp {
+        const who = need('Account', account);
+        return {
+            id: 'revokeRole',
+            label: `Remove the ${role} role from ${who}`,
+            description:
+                role === 'proposer'
+                    ? 'Use it to retire a proposer key (grant the replacement first). Removing the ONLY proposer means nobody can ever queue a change again: the system becomes permanent, like renouncing ownership.'
+                    : `The account can no longer ${role === 'canceller' ? 'cancel queued operations' : 'run ready operations'}.`,
+            risk: 'sensitive',
+            target: t.timelock,
+            data: interfaceOf('CircleswapTimelock').encodeFunctionData('revokeRole', [TIMELOCK_ROLES[role], who])
         };
     },
     updateDelay(t: GovTargets, seconds: number): GovOp {
@@ -288,6 +326,17 @@ export function describeCall(target: string, data: string, known: GovTargets): s
         if (p?.name === 'renounceOwnership') return 'Make the router permanent (renounce ownership)';
         if (p?.name === 'transferOwnership') return `Transfer router ownership to ${p.args[0]}`;
     }
-    if (tgt === known.timelock.toLowerCase()) return `Change the timelock itself (${sel})`;
+    if (tgt === known.timelock.toLowerCase()) {
+        const roleName = (hash: string) => (Object.entries(TIMELOCK_ROLES).find(([, h]) => h.toLowerCase() === String(hash).toLowerCase())?.[0] ?? 'unknown role');
+        try {
+            const p = interfaceOf('CircleswapTimelock').parseTransaction({ data });
+            if (p?.name === 'updateDelay') return `Change the timelock delay to ${Number(p.args[0]) / 86_400} day(s)`;
+            if (p?.name === 'grantRole') return `Give the ${roleName(p.args[0])} role to ${p.args[1]}`;
+            if (p?.name === 'revokeRole') return `Remove the ${roleName(p.args[0])} role from ${p.args[1]}`;
+        } catch {
+            /* fall through to the generic reading */
+        }
+        return `Change the timelock itself (${sel})`;
+    }
     return `Call ${sel} on ${target}`;
 }

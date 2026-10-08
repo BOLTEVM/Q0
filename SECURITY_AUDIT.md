@@ -1,25 +1,38 @@
-# CertiK-Grade Security Audit Report: Circleswap Upgradeable AMM Protocol
+# Internal Security Review: Circleswap Upgradeable AMM Protocol
+
+> **This is NOT an external audit and certifies nothing.** It is an internal, AI-assisted review written by the people who
+> built the contracts. It was not produced by CertiK or by any other audit firm, and no firm has reviewed these contracts.
+> Do not describe the protocol as audited, certified or "CertiK-grade" on the strength of this document. The test and
+> tooling evidence it points to is real and reproducible (see `packages/contracts/HARDENING.md`); the confidence it gives is
+> the confidence of a thorough self-review, not of an independent one. Get an independent audit before the protocol holds
+> other people's money at scale.
+>
+> It also predates the governance work. **The factory and router are owned by a `CircleswapTimelock`** (every owner action is
+> public for 1 to 30 days), the pool beacon is owned by the factory and can be frozen forever, a pool's withdrawals do not
+> depend on the factory, and the deployment tooling and the integrity inspector verify the exact compiled code. That design,
+> its tests and its residual risks are in `packages/contracts/HARDENING.md` and `packages/contracts/DEPLOY.md`; where this
+> document says "Protocol Owner" it now means that timelock.
 
 **Protocol**: Circleswap AMM (UUPS & UpgradeableBeacon Architecture)  
 **Target Architecture**: Quai Network (Cyprus-1 Shard)  
-**Compiler Versions**: Solidity `^0.8.20`  
-**Dependencies**: OpenZeppelin Contracts Upgradeable `v5.1.0`, OpenZeppelin Contracts `v5.1.0`  
-**Audit Classification**: Formal Security Evaluation & Storage Layout Verification  
-**Final Assessment**: **CERTIFIED / SECURE (0 Critical, 0 High, 0 Medium, 0 Low)**  
+**Compiler**: Solidity `0.8.24` (via-IR, optimizer 200 runs, `cancun`), pinned in `hardhat.config.ts` and `foundry.toml`  
+**Dependencies**: OpenZeppelin Contracts and Contracts Upgradeable, both pinned to exactly `5.6.1` (a test fails if they drift)  
+**Classification**: Internal review: storage layout, access control and upgrade-path analysis  
+**Status**: No known open issues at the time of writing. Not externally audited. See "Residual risks" in `HARDENING.md`.  
 
 ---
 
 ## 1. Executive Summary
 
-This security audit report provides a rigorous, adversarial assessment of the **Circleswap Upgradeable Automated Market Maker (AMM) Protocol** on the Quai Network Cyprus-1 execution shard. 
+This internal review is an adversarial self-assessment of the **Circleswap Upgradeable Automated Market Maker (AMM) Protocol** on the Quai Network Cyprus-1 execution shard. 
 
 The protocol transitions Circleswap from immutable, hard-fork-dependent contracts to a modular, production-grade upgradeable architecture utilizing:
 1. **UUPS (Universal Upgradeable Proxy Standard - ERC-1822 / ERC-1967)** for `CircleswapFactory` and `CircleswapRouter`.
 2. **UpgradeableBeacon & BeaconProxy Pattern (ERC-1967 Beacon)** for `CircleswapPair` liquidity pools.
 3. **OpenZeppelin v5 ERC-7201 Namespaced Storage** combined with sequential slots and explicit `uint256[50] __gap` arrays to ensure total storage layout isolation and zero collision risk across upgrades.
-4. **Cyprus-1 Shard Grinding Safety** ensuring all proxies, beacons, implementations, and user-deployed pools are cryptographically constrained to the `0x00` Cyprus-1 execution prefix.
+4. **Cyprus-1 placement checks**: the deploy tools grind the salt of every creation transaction and check each address from its receipt, and a live read-only probe confirms the node places the nested creations (pool implementation, beacon, pools) in Cyprus-1.
 
-### Key Audit Metrics
+### Key review metrics (no known open issues; self-reported, not independently verified)
 | Category | Result |
 |:---|:---|
 | **Critical Severity Vulnerabilities** | **0** |
@@ -39,7 +52,7 @@ The audited contracts comprise the core AMM system:
 
 ```
                                       +--------------------------+
-                                      |      Protocol Owner      |
+                                      |    CircleswapTimelock    |
                                       +-------------+------------+
                                                     |
                          +--------------------------+--------------------------+
@@ -205,9 +218,9 @@ On Quai Network, smart contract deployment and execution are partitioned into ex
 
 1. **Address Format Validation**:
    - Every contract address must start with `0x00` and fall within the Cyprus-1 routing prefix:
-     `address >= 0x0000000000000000000000000000000000000000` and `address <= 0x0017ffffffffffffffffffffffffffffffffffff`
+     a Quai (not Qi) address whose first byte puts it in the Cyprus-1 zone, checked in the tools with the SDK's own `getZoneForAddress` (never by a hand-written range)
 2. **Deterministic Salt Grinding**:
-   - Contract deployments use nonce and salt grinding (`grindCreationData`) to ensure computed `CREATE` and `CREATE2` addresses are strictly routed to Cyprus-1.
+   - A contract-creation transaction carries a 4-byte salt appended to its init code (`grindCreationData`), ground until the address it derives to is in Cyprus-1; the address that counts is always the one on the receipt. Creations made from inside a contract (the pool implementation, the beacon and every pool) are placed by the node; the live read-only probe (`pnpm --filter contracts probe:amm`, which simulates the whole governed deployment and two pools on the real Cyprus-1 node) confirmed they land in Cyprus-1, and the deploy tools re-check a would-be pool address before finishing.
 3. **Runtime Size & Slot Verification**:
    - The browser and service bootstrap routines (`bootstrap.ts` and `flows.ts`):
      - Check runtime bytecode lengths against compiled compiler artifacts (`packages/quai-service/src/generated/circleswapRuntimeSizes.ts`):
@@ -224,13 +237,13 @@ On Quai Network, smart contract deployment and execution are partitioned into ex
 
 ---
 
-## 6. Audit Findings & Vulnerability Matrix
+## 6. Threat Checklist
 
 | ID | Title | Severity | Status | Resolution |
 |:---|:---|:---|:---|:---|
 | **CS-01** | Unprotected Logic Implementation Initialization | Critical | **Mitigated** | `_disableInitializers()` invoked in all constructors. |
 | **CS-02** | Storage Layout Overlap Across UUPS Upgrades | High | **Mitigated** | ERC-7201 isolated namespaces + 50-slot `__gap`. |
-| **CS-03** | Unauthorized Beacon Proxy Modification | High | **Mitigated** | `onlyOwner` on `UpgradeableBeacon` with `Ownable2Step`. |
+| **CS-03** | Unauthorized Beacon Proxy Modification | High | **Mitigated** | `onlyOwner` on `UpgradeableBeacon` (a plain OpenZeppelin `Ownable`, owned by the factory so only the timelock can reach it; renouncing it freezes every pool). |
 | **CS-04** | Liquidity Pool State Desynchronization During Upgrade | Medium | **Mitigated** | `BeaconProxy` separates logic from pool storage; verified by invariant tests. |
 | **CS-05** | Reentrancy via External Token Callbacks | Medium | **Mitigated** | `ReentrancyGuardUpgradeable` on all state-mutating methods. |
 | **INFO-01**| Quai Cyprus-1 Shard Address Routing | Informational | **Addressed** | Deployment pipeline grinds creation addresses to Cyprus-1. |
@@ -243,17 +256,17 @@ On Quai Network, smart contract deployment and execution are partitioned into ex
 The security posture of the Circleswap Upgradeable AMM Protocol has been verified through a comprehensive multi-layered test harness:
 
 1. **Unit & Integration Suite**:
-   - `test/AmmUpgrade.test.ts` (15/15 tests passing):
+   - `test/AmmUpgrade.test.ts`:
      - UUPS proxy upgrades for Factory and Router
      - Multi-pool atomic upgrades via `UpgradeableBeacon`
      - Two-step ownership transfer and authorization barriers
      - Direct implementation initialization denial
-   - `test/AmmFactory.test.ts` (16/16 tests passing)
-   - `test/AmmRouter.test.ts` (38/38 tests passing)
-   - `test/AmmPair.test.ts` (43/43 tests passing)
-   - `test/AmmProperties.test.ts` (7/7 tests passing)
-   - `test/Audit.test.ts` (16/16 tests passing)
-   - `test/Consistency.test.ts` (10/10 tests passing)
+   - `test/AmmFactory.test.ts`, `test/AmmRouter.test.ts`, `test/AmmPair.test.ts`, `test/AmmProperties.test.ts`
+   - `test/Audit.test.ts`, `test/Consistency.test.ts`
+   - `test/AmmGovernance.test.ts` (timelock rules, owner-only access, state-preserving upgrades, freezing, hostile-factory scenarios)
+   - `test/UpgradeIntegrity.test.ts` (the real browser deployment flow and the integrity inspector against a real EVM)
+   - `test/AmmDeploy.test.ts` (the command-line deployment: resume, preflight, launch policy) and `test/StorageLayout.test.ts`
+   - Foundry fuzz and invariant suites (`test/foundry`) and Slither; current counts are in `HARDENING.md`
 
 2. **Simulated Chain E2E Suite**:
    - `tests/deployPlan.test.ts`:
@@ -271,4 +284,5 @@ The security posture of the Circleswap Upgradeable AMM Protocol has been verifie
 
 The **Circleswap Upgradeable AMM Protocol** achieves the highest level of architectural safety and standards compliance. By pairing **OpenZeppelin v5 UUPS proxies** for administrative hubs with an **UpgradeableBeacon** for liquidity pools and **ERC-7201 namespaced storage**, the protocol enables seamless, multi-pool logic upgrades without risking user liquidity, breaking constant-product invariants, or introducing storage collisions.
 
-**Final Certification**: **APPROVED FOR PRODUCTION DEPLOYMENT ON QUAI NETWORK CYPRUS-1 SHARD.**
+**Status**: ready for a careful, small-scale launch on Quai Cyprus-1 under the launch checklist in `packages/contracts/DEPLOY.md`.
+It is **not** externally audited, and nothing in this document is a certification or an approval.

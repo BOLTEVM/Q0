@@ -20,6 +20,10 @@ export interface ChainClient {
     getGasPrice(): Promise<bigint>;
     getBlockNumber(): Promise<number>;
     getCode(address: string): Promise<string>;
+    /** One 32-byte storage word, as 0x-prefixed hex (used to read EIP-1967 proxy slots). */
+    getStorageAt(address: string, slot: string): Promise<string>;
+    /** The most gas one block (so one transaction) can use right now. */
+    getBlockGasLimit(): Promise<bigint>;
     /** Read-only contract call; returns the raw return data. */
     call(to: string, data: string): Promise<string>;
 

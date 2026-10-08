@@ -8,3 +8,7 @@ export * from './record';
 export { CIRCLESWAP_ARTIFACTS, type CircleswapArtifactName } from '../generated/circleswapArtifacts';
 export * from './integrity';
 export * from './governance';
+export * from './code';
+export { normalizedCodeHash, stripMetadata, zeroImmutables, type ImmutableRange } from '../codeHash';
+export * from './gas';
+export * from './policy';

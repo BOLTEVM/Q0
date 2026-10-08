@@ -31,7 +31,7 @@ const slotAddress = async (addr: string, slot: string) => ethers.getAddress("0x"
  */
 async function governed(delay = 2 * DAY) {
   const [deployer, proposer, alice, bob, attacker] = await ethers.getSigners();
-  const timelock = await (await ethers.getContractFactory("CircleswapTimelock")).deploy(delay, [proposer.address], [ZERO]);
+  const timelock = await (await ethers.getContractFactory("CircleswapTimelock")).deploy(delay, [proposer.address], [ZERO], []);
   const tlAddr = await timelock.getAddress();
 
   const wquai = await (await ethers.getContractFactory("MockWQUAI")).deploy();
@@ -87,9 +87,9 @@ describe("Circleswap governance: the owner cannot pull liquidity or ship a harmf
     it("refuses a delay outside 1..30 days, at deploy and when changed later", async function () {
       const [, proposer] = await ethers.getSigners();
       const T = await ethers.getContractFactory("CircleswapTimelock");
-      await expect(T.deploy(DAY - 1, [proposer.address], [ZERO])).to.be.revertedWithCustomError(T, "DelayOutOfRange");
-      await expect(T.deploy(31 * DAY, [proposer.address], [ZERO])).to.be.revertedWithCustomError(T, "DelayOutOfRange");
-      await expect(T.deploy(0, [proposer.address], [ZERO])).to.be.revertedWithCustomError(T, "DelayOutOfRange");
+      await expect(T.deploy(DAY - 1, [proposer.address], [ZERO], [])).to.be.revertedWithCustomError(T, "DelayOutOfRange");
+      await expect(T.deploy(31 * DAY, [proposer.address], [ZERO], [])).to.be.revertedWithCustomError(T, "DelayOutOfRange");
+      await expect(T.deploy(0, [proposer.address], [ZERO], [])).to.be.revertedWithCustomError(T, "DelayOutOfRange");
 
       const { timelock, tlAddr, viaTimelock } = await loadFixture(governed);
       // Not even a scheduled operation can lower the delay below the floor.
@@ -128,6 +128,71 @@ describe("Circleswap governance: the owner cannot pull liquidity or ship a harmf
       await time.increase(delay + 1);
       await expect(timelock.connect(attacker).execute(target, 0, data, NO_PRED, ethers.id("c"))).to.be.reverted;
       expect(await factory.feeTo()).to.equal(ZERO);
+    });
+
+    describe("an optional guardian (can veto, cannot act)", function () {
+      async function withGuardian() {
+        const [deployer, proposer, guardian, attacker] = await ethers.getSigners();
+        const T = await ethers.getContractFactory("CircleswapTimelock");
+        const timelock = await T.deploy(2 * DAY, [proposer.address], [ZERO], [guardian.address]);
+        const Factory = await ethers.getContractFactory("CircleswapFactory");
+        const impl = await Factory.deploy();
+        const proxy = await (await ethers.getContractFactory("ERC1967Proxy")).deploy(
+          await impl.getAddress(),
+          Factory.interface.encodeFunctionData("initialize", [await timelock.getAddress()])
+        );
+        const factory = Factory.attach(await proxy.getAddress()) as any;
+        return { deployer, proposer, guardian, attacker, timelock, factory, Factory };
+      }
+
+      it("holds the canceller role and nothing else", async function () {
+        const { timelock, guardian, proposer } = await withGuardian();
+        expect(await timelock.hasRole(await timelock.CANCELLER_ROLE(), guardian.address)).to.equal(true);
+        expect(await timelock.hasRole(await timelock.PROPOSER_ROLE(), guardian.address)).to.equal(false);
+        expect(await timelock.hasRole(await timelock.DEFAULT_ADMIN_ROLE(), guardian.address)).to.equal(false);
+        // The proposer keeps both of its roles.
+        expect(await timelock.hasRole(await timelock.PROPOSER_ROLE(), proposer.address)).to.equal(true);
+        expect(await timelock.hasRole(await timelock.CANCELLER_ROLE(), proposer.address)).to.equal(true);
+      });
+
+      it("can veto a scheduled operation that the proposer queued", async function () {
+        const { timelock, factory, Factory, proposer, guardian, attacker } = await withGuardian();
+        const target = await factory.getAddress();
+        const data = Factory.interface.encodeFunctionData("setFeeTo", [attacker.address]);
+        await timelock.connect(proposer).schedule(target, 0, data, NO_PRED, ethers.id("g"), 2 * DAY);
+        const id = await timelock.hashOperation(target, 0, data, NO_PRED, ethers.id("g"));
+        await timelock.connect(guardian).cancel(id);
+        expect(await timelock.isOperation(id)).to.equal(false);
+        await time.increase(2 * DAY + 1);
+        await expect(timelock.connect(attacker).execute(target, 0, data, NO_PRED, ethers.id("g"))).to.be.reverted;
+        expect(await factory.feeTo()).to.equal(ZERO);
+      });
+
+      it("cannot schedule an operation, so it cannot start a change on its own", async function () {
+        const { timelock, factory, Factory, guardian, attacker } = await withGuardian();
+        const data = Factory.interface.encodeFunctionData("setFeeTo", [attacker.address]);
+        await expect(timelock.connect(guardian).schedule(await factory.getAddress(), 0, data, NO_PRED, ethers.id("g2"), 2 * DAY)).to.be.reverted;
+      });
+
+      it("cannot grant itself, or anyone, any role (only the timelock itself administers roles)", async function () {
+        const { timelock, guardian, attacker } = await withGuardian();
+        const PROPOSER = await timelock.PROPOSER_ROLE();
+        await expect(timelock.connect(guardian).grantRole(PROPOSER, guardian.address)).to.be.reverted;
+        await expect(timelock.connect(guardian).grantRole(PROPOSER, attacker.address)).to.be.reverted;
+      });
+
+      it("a stranger is not a guardian; a zero guardian is refused at deploy", async function () {
+        const { timelock, attacker, proposer } = await withGuardian();
+        expect(await timelock.hasRole(await timelock.CANCELLER_ROLE(), attacker.address)).to.equal(false);
+        const T = await ethers.getContractFactory("CircleswapTimelock");
+        await expect(T.deploy(2 * DAY, [proposer.address], [ZERO], [ZERO])).to.be.revertedWithCustomError(T, "ZeroGuardian");
+      });
+
+      it("a timelock without guardians is the proposer-only default", async function () {
+        const { timelock, proposer, attacker } = await loadFixture(governed);
+        expect(await timelock.hasRole(await timelock.CANCELLER_ROLE(), proposer.address)).to.equal(true);
+        expect(await timelock.hasRole(await timelock.CANCELLER_ROLE(), attacker.address)).to.equal(false);
+      });
     });
   });
 

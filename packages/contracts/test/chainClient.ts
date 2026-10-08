@@ -11,6 +11,8 @@ export function hardhatClient(signer: any): ChainClient {
     getGasPrice: async () => (await provider.getFeeData()).gasPrice!,
     getBlockNumber: () => provider.getBlockNumber(),
     getCode: a => provider.getCode(a),
+    getStorageAt: (a, slot) => provider.getStorage(a, slot),
+    getBlockGasLimit: async () => (await provider.getBlock("latest"))!.gasLimit,
     call: (to, data) => provider.call({ to, data }),
     estimateCreate: data => provider.estimateGas({ from: signer.address, data }),
     estimateCall: (to, data) => provider.estimateGas({ from: signer.address, to, data }),

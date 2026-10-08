@@ -8,6 +8,8 @@
     "deploy:quai": "ts-node --transpile-only scripts/deploy-quai.ts",
     "upload:artwork": "ts-node --transpile-only scripts/upload-artwork.ts",
     "probe:amm": "ts-node --transpile-only scripts/probe-amm.ts",
+    "governance": "ts-node --transpile-only scripts/governance.ts",
+    "verify:bundle": "ts-node --transpile-only scripts/verification-bundle.ts",
     "test:forge": "forge test",
     "test:forge:deep": "forge test --profile deep",
     "slither": "slither . --config-file slither.config.json",

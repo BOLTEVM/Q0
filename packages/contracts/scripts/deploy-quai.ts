@@ -33,11 +33,16 @@
  *                               other options as the original run.
  *   --force-redeploy            allow deploying again although deployed.ts already lists a Qrb
  *
- * Circleswap AMM (factory + router), a separate run from the above:
- *   deploy:quai -- --amm [--owner <addr>] [--fee-to <addr>] [--broadcast] [--resume]
- *   --fee-to turns the protocol fee on at deploy time (one sixth of the 0.3% fee is minted as LP tokens to that
- *   address); leave it off and the owner can turn it on later. Progress goes to
- *   deployments/<network>.amm.progress.json. See DEPLOY.md.
+ * Circleswap AMM (timelock + factory + router), a separate run from the above, and the same plan as the browser modal:
+ *   deploy:quai -- --amm --proposer <addr> --delay-days <1..30> [--guardians <a,b>] [--broadcast] [--resume]
+ *   The factory and router are upgradable proxies OWNED BY A TIMELOCK: every upgrade, fee change or freeze is public for the
+ *   delay before it can run, and the deployer keeps no power. --proposer (use a multisig) may queue and cancel; optional
+ *   --guardians may only cancel; --closed-execution lets only the proposer run a ready operation (default: anyone may).
+ *   --wquai and --probe-tokens override the registry's WQUAI and the Q0/WQUAI pair used to prove pools land in-zone.
+ *   On mainnet a deployment is refused unless the proposer is a contract, the delay is at least 2 days and WQUAI is the
+ *   registry's (--allow-account-proposer / --allow-short-delay / --allow-custom-wquai acknowledge each on purpose).
+ *   Progress, including the hash of a transaction sent but not yet confirmed, goes to deployments/<network>.amm.progress.json.
+ *   Afterwards use `governance` (scripts/governance.ts) to inspect it and to queue or run owner actions. See DEPLOY.md.
  *
  * Progress is written to deployments/<network>.progress.json after every step, so a failure part-way (after
  * gas has been spent) never loses an address.

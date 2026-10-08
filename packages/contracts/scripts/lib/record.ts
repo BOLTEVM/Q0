@@ -1,5 +1,6 @@
 import type { CircleswapDeployment } from "./circleswap";
-import type { AmmDeployment } from "./amm";
+import type { AmmDeployment, AmmProgress } from "./amm";
+import type { AmmFlowConfig } from "../../../quai-service/src/deploy/flows";
 
 export interface DeployedRecordValues {
     QRB: string | null;
@@ -78,23 +79,54 @@ export function deploymentRecord(network: string, chainId: bigint, deployer: str
     };
 }
 
-/** JSON-safe record of a broadcast AMM deployment. */
-export function ammRecord(network: string, chainId: bigint, deployer: string, owner: string, d: AmmDeployment) {
-    const one = (r: { address?: string; txHash?: string; blockNumber?: number; gasUsed?: bigint; gasLimit: bigint }) => ({
-        address: r.address,
-        txHash: r.txHash,
-        blockNumber: r.blockNumber,
-        gasUsed: r.gasUsed?.toString(),
-        gasLimit: r.gasLimit.toString()
-    });
+/**
+ * JSON-safe record of a broadcast AMM deployment: who governs it, every contract and the transaction that made it, the
+ * constructor arguments (for source verification on an explorer), and what the integrity inspector found.
+ */
+export function ammRecord(
+    network: string,
+    chainId: bigint,
+    deployer: string,
+    settings: Pick<AmmFlowConfig, "proposer" | "delaySeconds" | "wquai" | "openExecution" | "guardians">,
+    d: AmmDeployment,
+    progress: AmmProgress
+) {
+    const ctx = d.ctx;
+    const transactions: Record<string, unknown> = {};
+    for (const [id, rec] of Object.entries(progress.steps)) {
+        transactions[id] = {
+            address: rec.address,
+            txHash: rec.txHash,
+            blockNumber: rec.blockNumber,
+            gasUsed: rec.gasUsed,
+            gasLimit: rec.gasLimit,
+            constructorArgs: rec.constructorArgs
+        };
+    }
     return {
         network,
         chainId: chainId.toString(),
         deployer,
-        owner,
         deployedAt: new Date().toISOString(),
-        factory: one(d.factory),
-        router: one(d.router),
+        governance: {
+            proposer: settings.proposer,
+            delaySeconds: Math.floor(settings.delaySeconds),
+            delayDays: settings.delaySeconds / 86_400,
+            openExecution: settings.openExecution !== false,
+            guardians: settings.guardians ?? []
+        },
+        wquai: settings.wquai,
+        contracts: {
+            timelock: ctx.AMM_TIMELOCK,
+            factory: ctx.AMM_FACTORY,
+            factoryImplementation: ctx.AMM_FACTORY_IMPL,
+            router: ctx.AMM_ROUTER,
+            routerImplementation: ctx.AMM_ROUTER_IMPL,
+            pairBeacon: ctx.AMM_PAIR_BEACON ?? d.integrity?.facts.pairBeacon,
+            pairImplementation: d.integrity?.facts.pairImpl
+        },
+        transactions,
+        integrity: d.integrity && { verdict: d.integrity.verdict, summary: d.integrity.summary, checks: d.integrity.checks },
         probePoolAddress: d.probePoolAddress ?? null
     };
 }

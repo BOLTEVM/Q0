@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Sparkles, Factory, Sprout, Plus, Trash2 } from 'lucide-react';
 import {
   DEPLOYED,
@@ -9,13 +9,14 @@ import {
   formatBoostPct,
   formatBoostDuration,
   QRB_BOOST_THRESHOLD_WEI,
+  quaiRpcCall,
   type PoolInfo
 } from 'quai-service';
-import { qrbFlow, ammFlow, farmFlow, type Flow } from 'quai-service/deploy';
+import { qrbFlow, ammFlow, farmFlow, makeReader, checksum, assessAmmSettings, gatherAmmFacts, type AmmAcks, type AmmFacts, type Flow } from 'quai-service/deploy';
 import { readLocalDeployments } from 'quai-service/bootstrap';
 import FlowRunner from './FlowRunner';
 import type { SavedArtwork } from './artwork';
-import { Modal, Field, Notice, input, muted, smallBtn, select, box, row } from './ui';
+import { Modal, Field, Notice, AddrLink, input, muted, smallBtn, select, box, row } from './ui';
 
 interface CommonProps {
   walletAddress: string | null;
@@ -111,37 +112,123 @@ export function DeployQrbModal({ walletAddress, onConnect, onClose, onOpenArtwor
 export function DeployAmmModal({ walletAddress, onConnect, onClose, onOpenGovernance }: CommonProps & { onOpenGovernance?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [proposer, setProposer] = useState('');
-  const [delayDays, setDelayDays] = useState('2');
+  const [guardian, setGuardian] = useState('');
+  const [delayDays, setDelayDays] = useState('3');
   const [open, setOpen] = useState(true);
   const [wquai, setWquai] = useState(TOKEN_REGISTRY.WQUAI.address);
-  const proposerValue = proposer || walletAddress || '';
+  const [acks, setAcks] = useState<AmmAcks>({});
+  // A second AMM splits liquidity between two sets of pools: say so, and make it a deliberate choice.
+  const existingFactory = DEPLOYED.AMM_FACTORY ?? readLocalDeployments()?.values.AMM_FACTORY ?? null;
+  const [ackExisting, setAckExisting] = useState(false);
   const days = Number(delayDays);
+  const guardians = useMemo(() => (guardian.trim() ? [guardian.trim()] : []), [guardian]);
+  // Two real tokens with no pool at the new factory: a static call proves, at the end, that its pools land in Cyprus-1.
+  const probeTokens = useMemo<[string, string]>(() => [TOKEN_REGISTRY.Q0.address, TOKEN_REGISTRY.WQUAI.address], []);
 
   const cfg = useMemo(
-    () => ({ proposer: proposerValue, delaySeconds: Math.round(days * 86_400), wquai, openExecution: open }),
-    [proposerValue, days, wquai, open]
+    () => ({
+      proposer: proposer.trim(),
+      delaySeconds: Math.round(days * 86_400),
+      wquai: wquai.trim(),
+      openExecution: open,
+      guardians,
+      probe: { tokens: probeTokens }
+    }),
+    [proposer, days, wquai, open, guardians, probeTokens]
   );
+
+  // What the chain says about the accounts named above (a contract or an ordinary account, the WQUAI token), read as they are typed.
+  const [facts, setFacts] = useState<{ key: string; facts: AmmFacts } | null>(null);
+  const [factsError, setFactsError] = useState<string | null>(null);
+  const factsKey = `${cfg.proposer}|${cfg.wquai}`;
+  useEffect(() => {
+    if (!cfg.proposer) {
+      setFacts(null);
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(async () => {
+      try {
+        const reader = makeReader((m, p) => quaiRpcCall(m, p as any[]));
+        const f = await gatherAmmFacts(reader, { proposer: checksum(cfg.proposer), wquai: checksum(cfg.wquai), probeTokens });
+        if (alive) {
+          setFacts({ key: factsKey, facts: f });
+          setFactsError(null);
+        }
+      } catch (e: any) {
+        if (alive) {
+          setFacts(null);
+          setFactsError(/checksum|address/i.test(String(e?.message)) ? 'One of the addresses is not valid.' : String(e?.message ?? e));
+        }
+      }
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [cfg.proposer, cfg.wquai, factsKey, probeTokens]);
+
+  const currentFacts = facts && facts.key === factsKey ? facts.facts : null;
+  const assessment = useMemo(
+    () =>
+      currentFacts && walletAddress
+        ? assessAmmSettings(true, { deployer: walletAddress, proposer: cfg.proposer, delaySeconds: cfg.delaySeconds, openExecution: open, guardians, wquai: cfg.wquai, probeTokens }, currentFacts, acks)
+        : null,
+    [currentFacts, walletAddress, cfg.proposer, cfg.delaySeconds, cfg.wquai, open, guardians, probeTokens, acks]
+  );
+
   const build = useMemo(
     () => () => {
       if (!Number.isFinite(days)) throw new Error('The delay is not a number.');
-      return ammFlow(cfg);
+      if (!cfg.proposer) throw new Error('Enter the proposer: the account (use a multisig) that may queue and cancel owner actions. The deployer keeps no power.');
+      const flow = ammFlow(cfg); // validates every address and the delay
+      if (existingFactory && !ackExisting) throw new Error('An AMM is already recorded. Tick the box at the top to deploy a second one anyway.');
+      if (factsError) throw new Error(factsError);
+      if (walletAddress && !assessment) throw new Error('Checking the proposer and the WQUAI token on the chain…');
+      const blocking = assessment?.errors[0];
+      if (blocking) throw new Error(blocking.ack ? 'Tick the box above to accept this and continue.' : blocking.message);
+      return flow;
     },
-    [cfg, days]
+    [cfg, days, factsError, assessment, walletAddress, existingFactory, ackExisting]
   );
   const { flow, error } = useBuilt(build);
-  const proposerIsWallet = Boolean(walletAddress && proposerValue.toLowerCase() === walletAddress.toLowerCase());
+  const delayText = Number.isFinite(days) ? `${days} day${days === 1 ? '' : 's'}` : '—';
+  const ackable = assessment?.errors.filter(e => e.ack) ?? [];
+  const ACK_LABEL: Record<keyof AmmAcks, string> = {
+    allowAccountProposer: 'I understand the proposer is not a multisig and accept the risk.',
+    allowShortDelay: 'I understand a delay under two days gives users little time to react and accept it.',
+    allowCustomWquai: 'I understand this WQUAI is not the one the app uses, so the app and this router would disagree about native QUAI.'
+  };
+
+  const tick = (ok: boolean | null, text: ReactNode) => (
+    <div style={{ display: 'flex', gap: '0.45rem', fontSize: '0.78rem', lineHeight: 1.45, alignItems: 'flex-start' }}>
+      <span style={{ color: ok === null ? 'var(--text-dim)' : ok ? 'var(--success)' : 'var(--warning)', fontWeight: 800, width: 14, flexShrink: 0 }}>{ok === null ? '·' : ok ? '✓' : '!'}</span>
+      <span>{text}</span>
+    </div>
+  );
 
   return (
-    <Modal title="Deploy the Circleswap AMM" icon={<Factory size={20} style={{ color: 'var(--accent-plasma)' }} />} onClose={onClose} locked={busy} maxWidth={660}>
+    <Modal title="Deploy the Circleswap AMM" icon={<Factory size={20} style={{ color: 'var(--accent-plasma)' }} />} onClose={onClose} locked={busy} maxWidth={680}>
       <div style={{ fontSize: '0.8rem', lineHeight: 1.5, marginBottom: '0.75rem' }}>
-        Five contracts: a <strong>timelock</strong>, and the <strong>factory</strong> and <strong>router</strong> (each an implementation plus an upgradable proxy that is
+        Five transactions: a <strong>timelock</strong>, then the <strong>factory</strong> and <strong>router</strong> (each an implementation plus an upgradable proxy that is
         initialised in the same transaction it is created, so nobody can race its set-up). The factory also creates the pool beacon: every pool is a small proxy that follows it.
+        Each step is simulated first and read back from the chain before the next one is built on it.
       </div>
+
+      {existingFactory && (
+        <Notice tone="danger">
+          An AMM is already recorded in this app (factory <AddrLink address={existingFactory} />). Deploying another creates a second, separate set of pools and splits liquidity between them.
+          <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginTop: '0.4rem', cursor: 'pointer' }}>
+            <input type="checkbox" checked={ackExisting} onChange={e => setAckExisting(e.target.checked)} style={{ marginTop: 3 }} />
+            <span>I really want a second AMM.</span>
+          </label>
+        </Notice>
+      )}
 
       <div style={{ ...box, marginBottom: '0.9rem', fontSize: '0.8rem', lineHeight: 1.55 }}>
         <div style={{ fontWeight: 800, marginBottom: '0.3rem' }}>What the owner can and cannot do</div>
         <ul style={{ margin: '0 0 0 1.1rem', padding: 0 }}>
-          <li><strong>Owner of everything is the timelock</strong>, not a person. Every upgrade, fee change or freeze is announced on chain and waits the delay below before it can run; the proposer can cancel it.</li>
+          <li><strong>Owner of everything is the timelock</strong>, not a person. Every upgrade, fee change or freeze is announced on chain and waits the delay below before it can run; the proposer (and any guardian) can cancel it.</li>
           <li>The deployer keeps <strong>no power</strong>: no role on the timelock, no ownership, no key to any contract.</li>
           <li><strong>Existing liquidity can be made untouchable</strong>: one delayed, irreversible &ldquo;freeze pool upgrades&rdquo; step removes anyone&apos;s ability to change the code of existing pools, including through a future factory upgrade.</li>
           <li>A pool&apos;s withdrawals never depend on the factory, so even a hostile factory upgrade cannot lock providers in.</li>
@@ -149,30 +236,72 @@ export function DeployAmmModal({ walletAddress, onConnect, onClose, onOpenGovern
         </ul>
       </div>
 
-      <Field label="Proposer" hint={<>The account (use a multisig) that can queue and cancel owner actions. It owns nothing else.{proposerIsWallet && <> <strong>This is your connected wallet:</strong> fine for a test deployment, not for a production one.</>}</>}>
-        <input style={input} value={proposerValue} onChange={e => setProposer(e.target.value)} spellCheck={false} aria-label="Proposer" />
+      <Field label="Proposer" hint="The account that may queue and cancel owner actions. It owns nothing else. Use a multisig: a single key that is lost stops upgrades for good, and one that is stolen can queue a malicious one.">
+        <div style={{ display: 'flex', gap: '0.4rem' }}>
+          <input style={input} value={proposer} onChange={e => { setProposer(e.target.value); setAcks({}); }} placeholder="0x00… (your multisig)" spellCheck={false} aria-label="Proposer" />
+          {walletAddress && <button type="button" style={smallBtn} onClick={() => { setProposer(walletAddress); setAcks({}); }} title="Fine for a trial, not for a production deployment">Use my wallet</button>}
+        </div>
+      </Field>
+      <Field label="Guardian (optional)" hint="A second key that can veto a queued change but cannot queue or run one: the defence against a compromised proposer. Keep it apart from the proposer. It can also cancel legitimate changes, so name only an account you trust.">
+        <input style={input} value={guardian} onChange={e => setGuardian(e.target.value)} placeholder="0x00… (leave empty for none)" spellCheck={false} aria-label="Guardian" />
       </Field>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-        <Field label="Delay (days, 1 to 30)" hint="How long every owner action is public before it can run. Longer is safer for users.">
-          <input style={input} value={delayDays} onChange={e => setDelayDays(e.target.value)} inputMode="decimal" aria-label="Timelock delay in days" />
+        <Field label="Delay (days, 1 to 30)" hint="How long every owner action is public before it can run. Longer is safer for users, slower for fixes.">
+          <input style={input} value={delayDays} onChange={e => { setDelayDays(e.target.value); setAcks({}); }} inputMode="decimal" aria-label="Timelock delay in days" />
         </Field>
-        <Field label="WQUAI token" hint="Wrapped native QUAI, used by the router.">
-          <input style={input} value={wquai} onChange={e => setWquai(e.target.value)} spellCheck={false} aria-label="WQUAI address" />
+        <Field label="WQUAI token" hint="Wrapped native QUAI, used by the router. Leave it as the app's.">
+          <input style={input} value={wquai} onChange={e => { setWquai(e.target.value); setAcks({}); }} spellCheck={false} aria-label="WQUAI address" />
         </Field>
       </div>
       <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginBottom: '0.85rem', cursor: 'pointer', fontSize: '0.82rem' }}>
         <input type="checkbox" checked={open} onChange={e => setOpen(e.target.checked)} style={{ marginTop: 3 }} />
         <span>Let anyone run an operation once its delay has passed (recommended). Running it is then not a privilege, so a missing proposer cannot stall a decision that was already public.</span>
       </label>
-      {days < 2 && Number.isFinite(days) && days >= 1 && (
-        <Notice tone="warn">A delay under two days gives liquidity providers little time to notice and react. Production deployments should use several days.</Notice>
+
+      <div style={{ ...box, marginBottom: '0.85rem', display: 'grid', gap: '0.3rem' }}>
+        <div style={{ fontWeight: 800, fontSize: '0.8rem' }}>Checked against the chain before you sign anything</div>
+        {tick(
+          currentFacts ? currentFacts.wquai.hasCode && currentFacts.wquai.decimals === 18 : null,
+          currentFacts
+            ? currentFacts.wquai.hasCode
+              ? <>WQUAI: {currentFacts.wquai.symbol ?? 'a token'} with {currentFacts.wquai.decimals ?? '?'} decimals{cfg.wquai.toLowerCase() === TOKEN_REGISTRY.WQUAI.address.toLowerCase() ? ', the one the app uses' : ', NOT the one the app uses'}</>
+              : <>WQUAI: there is no contract at this address</>
+            : <>WQUAI: waiting for a proposer to check against</>
+        )}
+        {tick(
+          currentFacts ? currentFacts.proposerIsContract && cfg.proposer.toLowerCase() !== (walletAddress ?? '').toLowerCase() : null,
+          currentFacts
+            ? cfg.proposer.toLowerCase() === (walletAddress ?? '').toLowerCase()
+              ? <>Proposer: your connected wallet, the account that is deploying</>
+              : currentFacts.proposerIsContract
+                ? <>Proposer: a contract (a multisig, if it is yours to control)</>
+                : <>Proposer: an ordinary account, not a multisig</>
+            : <>Proposer: {factsError ?? 'enter it above'}</>
+        )}
+        {tick(cfg.delaySeconds >= 2 * 86_400 && cfg.delaySeconds <= 30 * 86_400, <>Delay: {delayText}{cfg.delaySeconds >= 2 * 86_400 ? '' : ' (under the two days recommended)'}</>)}
+        {tick(guardians.length > 0, guardians.length ? <>Guardian: one account that can veto</> : <>Guardian: none (only the proposer can cancel)</>)}
+        {tick(open, open ? <>Execution: open to anyone once the delay has passed</> : <>Execution: closed (only the proposer can run a ready operation)</>)}
+        {tick(true, <>At the end the factory is asked, without creating anything, where its next pool would land, and the result must be a Cyprus-1 address.</>)}
+      </div>
+
+      {assessment && assessment.warnings.length > 0 && (
+        <Notice tone="warn">
+          {assessment.warnings.map((w, i) => <div key={i} style={{ marginBottom: i < assessment.warnings.length - 1 ? 4 : 0 }}>{w}</div>)}
+        </Notice>
       )}
+      {ackable.map(e => (
+        <label key={e.ack} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', marginBottom: '0.7rem', cursor: 'pointer', fontSize: '0.8rem', color: 'var(--warning)' }}>
+          <input type="checkbox" checked={Boolean(acks[e.ack!])} onChange={ev => setAcks(a => ({ ...a, [e.ack!]: ev.target.checked }))} style={{ marginTop: 3 }} />
+          <span><strong>{e.message}</strong><br />{ACK_LABEL[e.ack!]}</span>
+        </label>
+      ))}
 
       <FlowRunner flowId="AMM" flow={flow} configError={error} fingerprint={json(cfg)} walletAddress={walletAddress} onConnect={onConnect} onBusy={setBusy} />
 
       <div style={{ ...muted, fontSize: '0.75rem', marginTop: '0.9rem', lineHeight: 1.5 }}>
-        After deploying: check the result in <button type="button" style={smallBtn} onClick={onOpenGovernance}>Governance &amp; integrity</button>, create the first pool from the
-        liquidity modal, and when the pool code is final, queue &ldquo;freeze pool upgrades&rdquo; (and, if you want the router permanent too, &ldquo;make the router permanent&rdquo;).
+        After deploying: check the result in <button type="button" style={smallBtn} onClick={onOpenGovernance}>Governance &amp; integrity</button>, commit the factory and router addresses to
+        <code> deployed.ts</code> (the copy button above) so every visitor gets them, create the first pools from the liquidity modal, and when the pool code is final, queue
+        &ldquo;freeze pool upgrades&rdquo; (and, if you want the router permanent too, &ldquo;make the router permanent&rdquo;).
       </div>
     </Modal>
   );

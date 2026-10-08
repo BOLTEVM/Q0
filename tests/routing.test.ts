@@ -3,12 +3,16 @@ import {
     parseUnits,
     formatUnits,
     quoteRoute,
+    quoteCrossDexRoute,
+    buildCrossDexRoutes,
     getSwapRoute,
     findPool,
     tokenAddress,
     CANDIDATE_POOLS,
     encodeAddLiquidity,
+    encodeAddLiquidityETH,
     encodeApprove,
+    encodeRemoveLiquidityETH,
     quoteLiquidityB,
     applySlippage,
     clampSlippagePct,
@@ -176,6 +180,49 @@ describe('quoteRoute', () => {
     });
 });
 
+describe('cross-DEX navigation routes', () => {
+    test('bridges QRB through Q0 and BDELTA into the Quainance WQUAI pool', () => {
+        const pools = [
+            { pair: '0x00' + '1'.repeat(40), dex: 'CIRCLESWAP' as const, tokens: ['QRB', 'Q0'] as [string, string] },
+            { pair: '0x00' + '2'.repeat(40), dex: 'CIRCLESWAP' as const, tokens: ['Q0', 'BDELTA'] as [string, string] },
+            { pair: '0x00' + '3'.repeat(40), dex: 'QUAINANCE' as const, tokens: ['BDELTA', 'WQUAI'] as [string, string] }
+        ];
+        const route = buildCrossDexRoutes(pools).find(r => r.path.join('/') === 'QRB/Q0/BDELTA/WQUAI');
+        expect(route).toBeDefined();
+        expect(route!.segments).toEqual([
+            { dex: 'CIRCLESWAP', path: ['QRB', 'Q0', 'BDELTA'] },
+            { dex: 'QUAINANCE', path: ['BDELTA', 'WQUAI'] }
+        ]);
+
+        const reserveMap = {
+            [pools[0].pair.toLowerCase()]: reserves(['QRB', 'Q0'], 1n * E18, 2n * E18),
+            [pools[1].pair.toLowerCase()]: reserves(['Q0', 'BDELTA'], 2_000n * E18, 1_000n * E18),
+            [pools[2].pair.toLowerCase()]: reserves(['BDELTA', 'WQUAI'], 1_000n * E18, 100n * E18)
+        };
+        const quote = quoteCrossDexRoute(route!, false, 1n * E18, reserveMap, 0, pools)!;
+        const first = (1n * E18 * 997n * (2n * E18)) / (1n * E18 * 1000n + 1n * E18 * 997n);
+        const second = (first * 997n * (1_000n * E18)) / (2_000n * E18 * 1000n + first * 997n);
+        const third = (second * 997n * (100n * E18)) / (1_000n * E18 * 1000n + second * 997n);
+        expect(quote.amountOut).toBe(third);
+        expect(quote.minimumReceived).toBe(third);
+    });
+
+    test('reversing a cross-DEX route reverses both segment order and token paths', () => {
+        const pools = [
+            { pair: '0x00' + '1'.repeat(40), dex: 'CIRCLESWAP' as const, tokens: ['QRB', 'Q0'] as [string, string] },
+            { pair: '0x00' + '2'.repeat(40), dex: 'CIRCLESWAP' as const, tokens: ['Q0', 'BDELTA'] as [string, string] },
+            { pair: '0x00' + '3'.repeat(40), dex: 'QUAINANCE' as const, tokens: ['BDELTA', 'WQUAI'] as [string, string] }
+        ];
+        const route = buildCrossDexRoutes(pools).find(r => r.path[0] === 'QRB' && r.path[r.path.length - 1] === 'WQUAI')!;
+        const reverse = quoteCrossDexRoute(route, true, 1n * E18, {
+            [pools[0].pair.toLowerCase()]: reserves(['QRB', 'Q0'], 1n * E18, 2n * E18),
+            [pools[1].pair.toLowerCase()]: reserves(['Q0', 'BDELTA'], 2_000n * E18, 1_000n * E18),
+            [pools[2].pair.toLowerCase()]: reserves(['BDELTA', 'WQUAI'], 1_000n * E18, 100n * E18)
+        }, 0, pools);
+        expect(reverse).not.toBeNull();
+    });
+});
+
 describe('liquidity encoding', () => {
     const owner = '0x005c0faa00000000000000000000000000000001';
 
@@ -207,6 +254,44 @@ describe('liquidity encoding', () => {
         const data = encodeApprove(DEXES.QUAISWAP.router, 3n);
         expect(data.slice(0, 10)).toBe('0x095ea7b3');
         expect(data.length).toBe(10 + 128);
+    });
+
+    test('native QUAI liquidity calldata uses the Circleswap ETH entrypoints', () => {
+        const add = encodeAddLiquidityETH({
+            token: tokenAddress('QRB'),
+            amountTokenDesired: 5n * E18,
+            amountTokenMin: 4n * E18,
+            amountETHMin: 6n * E18,
+            to: owner,
+            deadline: 1234n
+        });
+        expect(add.slice(0, 10)).toBe('0xf305d719');
+        const addWords = add.slice(10).match(/.{64}/g)!;
+        expect(addWords.length).toBe(6);
+        expect(addWords[0].slice(24)).toBe(tokenAddress('QRB').slice(2).toLowerCase());
+        expect(BigInt('0x' + addWords[1])).toBe(5n * E18);
+        expect(BigInt('0x' + addWords[2])).toBe(4n * E18);
+        expect(BigInt('0x' + addWords[3])).toBe(6n * E18);
+        expect(addWords[4].slice(24)).toBe(owner.slice(2));
+        expect(BigInt('0x' + addWords[5])).toBe(1234n);
+
+        const remove = encodeRemoveLiquidityETH({
+            token: tokenAddress('QRB'),
+            liquidity: 3n * E18,
+            amountTokenMin: 2n * E18,
+            amountETHMin: 1n * E18,
+            to: owner,
+            deadline: 1234n
+        });
+        expect(remove.slice(0, 10)).toBe('0x02751cec');
+        const removeWords = remove.slice(10).match(/.{64}/g)!;
+        expect(removeWords.length).toBe(6);
+        expect(removeWords[0].slice(24)).toBe(tokenAddress('QRB').slice(2).toLowerCase());
+        expect(BigInt('0x' + removeWords[1])).toBe(3n * E18);
+        expect(BigInt('0x' + removeWords[2])).toBe(2n * E18);
+        expect(BigInt('0x' + removeWords[3])).toBe(1n * E18);
+        expect(removeWords[4].slice(24)).toBe(owner.slice(2));
+        expect(BigInt('0x' + removeWords[5])).toBe(1234n);
     });
 
     test('quoteLiquidityB keeps the pool ratio; applySlippage floors', () => {

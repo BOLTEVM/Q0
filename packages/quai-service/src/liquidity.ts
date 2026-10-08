@@ -6,6 +6,8 @@
 //   allowance(address,address)                                               0xdd62ed3e
 //   approve(address,uint256)                                                 0x095ea7b3
 //   addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256) 0xe8e33700
+//   addLiquidityETH(address,uint256,uint256,uint256,address,uint256)          0xf305d719
+//   removeLiquidityETH(address,uint256,uint256,uint256,address,uint256)       0x02751cec
 
 import { quaiRpcCall, quaiCall, DEFAULT_RPC } from './index';
 import { requireDex, tokenAddress, type DexId } from './registries/pools';
@@ -43,6 +45,46 @@ export function encodeAddLiquidity(p: {
     );
 }
 
+/** Encode the Circleswap native-QUAI liquidity entrypoint. The router wraps the value into WQUAI. */
+export function encodeAddLiquidityETH(p: {
+    token: string;
+    amountTokenDesired: bigint;
+    amountTokenMin: bigint;
+    amountETHMin: bigint;
+    to: string;
+    deadline: bigint;
+}): string {
+    return (
+        '0xf305d719' +
+        addrWord(p.token) +
+        word(p.amountTokenDesired) +
+        word(p.amountTokenMin) +
+        word(p.amountETHMin) +
+        addrWord(p.to) +
+        word(p.deadline)
+    );
+}
+
+/** Encode native-QUAI withdrawal from a pool whose on-chain second token is WQUAI. */
+export function encodeRemoveLiquidityETH(p: {
+    token: string;
+    liquidity: bigint;
+    amountTokenMin: bigint;
+    amountETHMin: bigint;
+    to: string;
+    deadline: bigint;
+}): string {
+    return (
+        '0x02751cec' +
+        addrWord(p.token) +
+        word(p.liquidity) +
+        word(p.amountTokenMin) +
+        word(p.amountETHMin) +
+        addrWord(p.to) +
+        word(p.deadline)
+    );
+}
+
 export async function getAllowance(token: string, owner: string, spender: string): Promise<bigint> {
     const hex = await quaiCall(token, '0xdd62ed3e' + addrWord(owner) + addrWord(spender));
     return !hex || hex === '0x' ? 0n : BigInt(hex);
@@ -74,7 +116,7 @@ export function applySlippage(amount: bigint, slippagePct: number): bigint {
 }
 
 export interface PreparedTx {
-    tx: { from: string; to: string; data: string; gas: string; accessList?: any[] };
+    tx: { from: string; to: string; data: string; gas: string; value?: string; accessList?: any[] };
     gasLimit: bigint;
     gasPrice: bigint;
     /** gasLimit * gasPrice, in wei: the most this transaction can cost. */
@@ -93,9 +135,10 @@ export async function prepareContractCall(
     to: string,
     data: string,
     gasMultiplier: number,
-    rpcUrl: string = DEFAULT_RPC
+    rpcUrl: string = DEFAULT_RPC,
+    value: bigint = 0n
 ): Promise<PreparedTx> {
-    const base = { from, to, data };
+    const base = { from, to, data, ...(value > 0n ? { value: '0x' + value.toString(16) } : {}) };
 
     let estimate: bigint;
     try {

@@ -28,14 +28,19 @@ const pairAt = (i: number) => '0x00' + (i + 1).toString(16).padStart(38, '0');
 
 /** Runs `fn` with Circleswap pointed at a (fake) factory and router, then puts it back. */
 async function withCircleswapLive<T>(fn: () => Promise<T> | T): Promise<T> {
-    const before = { factory: DEXES.CIRCLESWAP.factory, router: DEXES.CIRCLESWAP.router };
-    DEXES.CIRCLESWAP.factory = FACTORY;
-    DEXES.CIRCLESWAP.router = ROUTER;
+    // `factory` and `router` are getters over the deployed addresses (so a deployment applied at start-up is seen), so they are
+    // replaced as properties and the original descriptors put back, rather than assigned.
+    const before = {
+        factory: Object.getOwnPropertyDescriptor(DEXES.CIRCLESWAP, 'factory')!,
+        router: Object.getOwnPropertyDescriptor(DEXES.CIRCLESWAP, 'router')!
+    };
+    Object.defineProperty(DEXES.CIRCLESWAP, 'factory', { value: FACTORY, configurable: true, writable: true, enumerable: true });
+    Object.defineProperty(DEXES.CIRCLESWAP, 'router', { value: ROUTER, configurable: true, writable: true, enumerable: true });
     try {
         return await fn();
     } finally {
-        DEXES.CIRCLESWAP.factory = before.factory;
-        DEXES.CIRCLESWAP.router = before.router;
+        Object.defineProperty(DEXES.CIRCLESWAP, 'factory', before.factory);
+        Object.defineProperty(DEXES.CIRCLESWAP, 'router', before.router);
     }
 }
 

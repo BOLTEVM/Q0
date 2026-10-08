@@ -57,6 +57,9 @@ export function deployedFromProgress(base: DeployedAddresses, flows: Array<FlowP
             const v = f.ctx[key];
             if (v && ADDRESS.test(v)) out[key] = v;
         }
+        if (f.ctx.EXISTING_FARM && ADDRESS.test(f.ctx.EXISTING_FARM) && !out.MASTERCHEF) {
+            out.MASTERCHEF = f.ctx.EXISTING_FARM;
+        }
     }
     if (artworkUri) out.ARTWORK_URI = artworkUri;
     return out;

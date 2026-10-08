@@ -104,6 +104,16 @@ export class QuaiChainClient implements ChainClient {
     async call(to: string, data: string) {
         return (await rpc(this.rpcUrl, "quai_call", [{ to: getAddress(to), data }, "latest"])) as string;
     }
+    async getStorageAt(address: string, slot: string) {
+        return (await rpc(this.rpcUrl, "quai_getStorageAt", [getAddress(address), slot, "latest"])) as string;
+    }
+    async getBlockGasLimit() {
+        // Quai keeps the gas limit in the block's `header`, not in `woHeader`.
+        const block = await rpc(this.rpcUrl, "quai_getBlockByNumber", ["latest", false]);
+        const raw = block?.header?.gasLimit;
+        if (typeof raw !== "string") throw new Error("the node did not report a block gas limit");
+        return BigInt(raw);
+    }
 
     private async nextNonce(): Promise<number> {
         return parseInt(await rpc(this.rpcUrl, "quai_getTransactionCount", [this.deployer, "pending"]), 16);

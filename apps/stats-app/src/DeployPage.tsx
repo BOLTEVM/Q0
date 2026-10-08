@@ -1,7 +1,7 @@
-import { useState } from 'react';
-import { Rocket, Image as ImageIcon, Sparkles, Factory, Sprout, Droplets, ShieldCheck, FileCode2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Rocket, Image as ImageIcon, Sparkles, Factory, Sprout, Droplets, ShieldCheck, FileCode2, CheckCircle2, Circle, AlertTriangle, ListChecks } from 'lucide-react';
 import { DEPLOYED, quaiRpcCall, EIP1967_IMPLEMENTATION_SLOT, type PoolInfo, type DeployedAddresses } from 'quai-service';
-import { makeReader, verifyCodeSize, verifyProxy, renderDeployedTs, checksum, type CircleswapArtifactName } from 'quai-service/deploy';
+import { makeReader, verifyCode, verifyProxy, inspectAmm, renderDeployedTs, checksum, type CircleswapArtifactName, type IntegrityReport } from 'quai-service/deploy';
 import { readLocalDeployments, clearLocalDeployments } from 'quai-service/bootstrap';
 import { DeployQrbModal, DeployAmmModal, DeployFarmModal } from './DeployModals';
 import ArtworkModal from './ArtworkModal';
@@ -34,9 +34,35 @@ export default function DeployPage({ walletAddress, onConnect, pools, onOpenLiqu
   const [open, setOpen] = useState<Open>(null);
   const [artwork, setArtwork] = useState<SavedArtwork | null>(() => loadArtwork());
   const [checks, setChecks] = useState<Record<string, Check>>({});
+  const [integrity, setIntegrity] = useState<IntegrityReport | null>(null);
+  const [integrityError, setIntegrityError] = useState<string | null>(null);
+  const [inspecting, setInspecting] = useState(false);
   const local = readLocalDeployments();
 
   const activeAddress = (key: AddressKey): string | null => DEPLOYED[key] ?? local?.values[key] ?? null;
+  const factoryAddress = activeAddress('AMM_FACTORY');
+  const routerAddress = activeAddress('AMM_ROUTER');
+
+  // Who can change what, read from the chain whenever the page opens or the AMM changes: the verdict is never taken from this app's records.
+  const inspect = async () => {
+    if (!factoryAddress) {
+      setIntegrity(null);
+      return;
+    }
+    setInspecting(true);
+    setIntegrityError(null);
+    try {
+      setIntegrity(await inspectAmm(makeReader((m, p) => quaiRpcCall(m, p as any[])), { factory: factoryAddress, router: routerAddress }));
+    } catch (e: any) {
+      setIntegrity(null);
+      setIntegrityError(e?.message ?? 'The check could not run.');
+    } finally {
+      setInspecting(false);
+    }
+  };
+  useEffect(() => {
+    void inspect();
+  }, [factoryAddress, routerAddress]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const origin = (key: AddressKey): 'local' | 'file' | null => {
     const v = activeAddress(key);
@@ -45,6 +71,7 @@ export default function DeployPage({ walletAddress, onConnect, pools, onOpenLiqu
   };
 
   const verifyAll = async () => {
+    void inspect();
     const reader = makeReader((m, p) => quaiRpcCall(m, p as any[]));
     setChecks(Object.fromEntries(ROWS.filter(r => activeAddress(r.key)).map(r => [r.key, { state: 'checking' } as Check])));
     for (const r of ROWS) {
@@ -59,7 +86,7 @@ export default function DeployPage({ walletAddress, onConnect, pools, onOpenLiqu
           const implAddress = checksum('0x' + rawImpl.slice(-40));
           await verifyProxy(reader, r.contract, checksum(address), implAddress);
         } else {
-          await verifyCodeSize(reader, r.contract, checksum(address));
+          await verifyCode(reader, r.contract, checksum(address));
         }
         setChecks(c => ({ ...c, [r.key]: { state: 'ok' } }));
       } catch (e: any) {
@@ -85,6 +112,35 @@ export default function DeployPage({ walletAddress, onConnect, pools, onOpenLiqu
     }
   })();
 
+  const days = (s?: number) => (s ? s / 86_400 : 0);
+  const poolsFrozen = integrity?.facts.pairBeaconOwner?.toLowerCase() === '0x0000000000000000000000000000000000000000';
+  type Item = { title: string; detail: string; state: 'done' | 'todo' | 'warn'; optional?: boolean; action?: { label: string; run: () => void } };
+  // The go-live list: each line is computed from the chain or from what is recorded, never ticked by hand.
+  const checklist: Item[] = [
+    { title: 'Artwork on Arweave and verified', state: artwork?.verifiedAt ? 'done' : 'todo', detail: artwork?.verifiedAt ? `${artwork.name} serves exactly the chosen file.` : 'The link is permanent once deployed.', action: artwork?.verifiedAt ? undefined : { label: 'Open', run: () => setOpen('ARTWORK') } },
+    { title: 'Qrb and the artifact NFT deployed', state: activeAddress('QRB') && activeAddress('QRB_NFT') ? 'done' : 'todo', detail: activeAddress('QRB') ? 'Both are recorded.' : 'Deploy them first so the farm can use the boost.', action: activeAddress('QRB') ? undefined : { label: 'Open', run: () => setOpen('QRB') } },
+    {
+      title: 'AMM deployed, and verified from the chain',
+      state: !factoryAddress ? 'todo' : integrity && integrity.verdict !== 'UNSAFE' ? 'done' : integrity ? 'warn' : 'todo',
+      detail: !factoryAddress ? 'Deploy the timelock, factory and router.' : integrity ? integrity.summary : inspecting ? 'Reading the chain…' : (integrityError ?? 'Not checked yet.'),
+      action: !factoryAddress ? { label: 'Deploy', run: () => setOpen('AMM') } : { label: 'Open governance', run: () => setOpen('GOV') }
+    },
+    {
+      title: 'Proposer is a multisig and the delay is at least two days',
+      state: !integrity ? 'todo' : days(integrity.facts.timelockDelaySeconds) >= 2 ? 'done' : 'warn',
+      detail: !integrity ? 'Read from the chain once the AMM exists.' : `The delay is ${days(integrity.facts.timelockDelaySeconds)} day(s). Who holds the proposer role cannot be listed from the chain: confirm it is your multisig in Governance.`
+    },
+    {
+      title: 'AMM addresses committed to deployed.ts',
+      state: !factoryAddress ? 'todo' : origin('AMM_FACTORY') === 'file' && origin('AMM_ROUTER') === 'file' ? 'done' : 'warn',
+      detail: !factoryAddress ? 'After deploying.' : origin('AMM_FACTORY') === 'file' && origin('AMM_ROUTER') === 'file' ? 'Every visitor gets the AMM.' : 'They live only in this browser. Copy deployed.ts below, commit it and rebuild, or visitors will not see the AMM.'
+    },
+    { title: 'First pools created', state: integrity && integrity.facts.pools.total > 0 ? 'done' : 'todo', detail: integrity && integrity.facts.pools.total > 0 ? `${integrity.facts.pools.total} pool(s). ` + (integrity.facts.pools.foreign ? `${integrity.facts.pools.foreign} outside the factory's governance: see Governance.` : '') : 'Seed them at the market ratio: the first deposit sets the price.', action: factoryAddress ? { label: 'Create / manage pools', run: onOpenLiquidity } : undefined },
+    { title: 'Pool code frozen', optional: true, state: poolsFrozen ? 'done' : 'todo', detail: poolsFrozen ? 'Nobody can ever change existing pools.' : 'When the pool code is final, this makes every existing pool untouchable. Irreversible; it also means a pool bug could never be fixed in those pools.', action: factoryAddress && !poolsFrozen ? { label: 'Open governance', run: () => setOpen('GOV') } : undefined },
+    { title: 'Router permanent', optional: true, state: integrity?.facts.routerOwnerKind === 'renounced' ? 'done' : 'todo', detail: integrity?.facts.routerOwnerKind === 'renounced' ? 'The router can never be replaced.' : 'Users approve tokens to the router, so its upgrades are the sensitive ones. Making it permanent removes that power for good.', action: factoryAddress && integrity?.facts.routerOwnerKind !== 'renounced' ? { label: 'Open governance', run: () => setOpen('GOV') } : undefined },
+    { title: 'Farm deployed and funded', state: activeAddress('MASTERCHEF') ? 'done' : 'todo', detail: activeAddress('MASTERCHEF') ? 'Recorded. It pays rewards only from its own BDELTA / Q0 balance: fund it.' : 'Dual-reward farm with the Qrb boost.', action: activeAddress('MASTERCHEF') ? undefined : { label: 'Open', run: () => setOpen('FARM') } }
+  ];
+
   const card = (icon: React.ReactNode, title: string, status: React.ReactNode, body: string, action: React.ReactNode) => (
     <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
@@ -109,8 +165,9 @@ export default function DeployPage({ walletAddress, onConnect, pools, onOpenLiqu
         first pool → farm → fund the farm.
       </Notice>
       <Notice tone="warn">
-        Deployment spends real QUAI and is permanent. A creation costs roughly 2.5× what the simulator estimates, so gas limits are set wide; unused gas is refunded when a transaction succeeds, but a
-        transaction that reverts uses its whole limit. The same deployment is also available from the command line (<code>pnpm --filter contracts deploy:quai</code>, see DEPLOY.md).
+        Deployment spends real QUAI and is permanent. Quai&apos;s simulator is an unreliable guide to what a creation costs (real use has ranged from about 0.4× to 2.5× its figure), so gas limits are set wide;
+        unused gas is refunded when a transaction succeeds, but one that runs out of gas or reverts uses its whole limit. The same deployment is also available from the command line
+        (<code>pnpm --filter contracts deploy:quai -- --amm</code>, see DEPLOY.md), which runs the identical plan and the identical launch checks.
       </Notice>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem', marginBottom: '1.25rem' }}>
@@ -152,10 +209,29 @@ export default function DeployPage({ walletAddress, onConnect, pools, onOpenLiqu
         {card(
           <ShieldCheck size={18} style={{ color: 'var(--accent-plasma)' }} />,
           '6. Governance & integrity',
-          activeAddress('AMM_FACTORY') ? <Badge severity="info">Live checks</Badge> : <Badge severity="neutral">Needs the AMM</Badge>,
-          'Verify from the chain who can upgrade what and how fast, see every pending change, queue new ones, and freeze pool code forever once it is final.',
+          !factoryAddress ? <Badge severity="neutral">Needs the AMM</Badge>
+            : inspecting && !integrity ? <Badge severity="neutral">Checking…</Badge>
+            : integrity ? <Badge severity={integrity.verdict === 'UNSAFE' ? 'danger' : 'ok'} title={integrity.summary}>{integrity.verdict === 'UNSAFE' ? 'Unsafe' : integrity.verdict === 'IMMUTABLE_POOLS' ? 'Pools immutable' : `Governed${integrity.facts.timelockDelaySeconds ? ` · ${integrity.facts.timelockDelaySeconds / 86_400}d` : ''}`}</Badge>
+            : <Badge severity="warn">Check failed</Badge>,
+          'Verify from the chain who can upgrade what and how fast, see every pending change, queue new ones, rotate keys, and freeze pool code forever once it is final.',
           <button type="button" className="btn-primary" style={{ minHeight: 40 }} onClick={() => setOpen('GOV')}>Open governance</button>
         )}
+      </div>
+
+      <div className="glass-card" style={{ marginBottom: '1.25rem' }}>
+        <div style={{ fontWeight: 800, fontFamily: 'var(--font-display)', display: 'flex', gap: '0.4rem', alignItems: 'center', marginBottom: '0.6rem' }}><ListChecks size={18} /> Launch checklist</div>
+        {checklist.map(item => (
+          <div key={item.title} style={{ display: 'flex', gap: '0.55rem', alignItems: 'flex-start', marginBottom: '0.5rem' }}>
+            {item.state === 'done' ? <CheckCircle2 size={16} style={{ color: 'var(--success)', flexShrink: 0, marginTop: 1 }} />
+              : item.state === 'warn' ? <AlertTriangle size={16} style={{ color: 'var(--warning)', flexShrink: 0, marginTop: 1 }} />
+              : <Circle size={16} style={{ color: 'var(--text-dim)', flexShrink: 0, marginTop: 1 }} />}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: '0.82rem' }}>{item.title}{item.optional && <span style={{ ...muted, fontWeight: 400 }}> (optional)</span>}</div>
+              <div style={{ ...muted, fontSize: '0.74rem' }}>{item.detail}</div>
+            </div>
+            {item.action && <button type="button" style={smallBtn} onClick={item.action.run}>{item.action.label}</button>}
+          </div>
+        ))}
       </div>
 
       <div className="glass-card">
@@ -192,6 +268,29 @@ export default function DeployPage({ walletAddress, onConnect, pools, onOpenLiqu
                   </tr>
                 );
               })}
+              {factoryAddress && (
+                <>
+                  <tr>
+                    <td style={{ fontWeight: 700 }}>Timelock (owner)</td>
+                    <td>{integrity?.facts.owner && integrity.facts.ownerKind === 'timelock' ? <AddrLink address={integrity.facts.owner} /> : <span style={muted}>{integrity?.facts.ownerKind === 'renounced' ? 'nobody: renounced' : integrity ? 'not a Circleswap timelock' : inspecting ? 'reading…' : '—'}</span>}</td>
+                    <td><Badge severity="neutral" title="Read from the chain, not stored">From chain</Badge></td>
+                    <td>{integrity?.facts.ownerKind === 'timelock' && integrity.facts.timelockDelaySeconds ? <Badge severity="ok">{integrity.facts.timelockDelaySeconds / 86_400}-day delay</Badge> : integrity ? <Badge severity={integrity.facts.ownerKind === 'renounced' ? 'ok' : 'danger'}>{integrity.facts.ownerKind === 'renounced' ? 'Permanent' : 'Check owner'}</Badge> : null}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ fontWeight: 700 }}>Pool beacon (every pool follows it)</td>
+                    <td>{integrity?.facts.pairBeacon ? <AddrLink address={integrity.facts.pairBeacon} /> : <span style={muted}>{inspecting ? 'reading…' : '—'}</span>}</td>
+                    <td><Badge severity="neutral" title="Read from the chain, not stored">From chain</Badge></td>
+                    <td>{integrity?.facts.pairBeaconOwner ? (integrity.facts.pairBeaconOwner.toLowerCase() === '0x0000000000000000000000000000000000000000' ? <Badge severity="ok">Frozen forever</Badge> : <Badge severity="info">Upgradable via timelock</Badge>) : null}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ fontWeight: 700 }}>Pool implementation</td>
+                    <td>{integrity?.facts.pairImpl ? <AddrLink address={integrity.facts.pairImpl} /> : <span style={muted}>{inspecting ? 'reading…' : '—'}</span>}</td>
+                    <td><Badge severity="neutral" title="Read from the chain, not stored">From chain</Badge></td>
+                    <td>{integrity ? <Badge severity={integrity.checks.find(c => c.id === 'pair.code')?.level === 'pass' ? 'ok' : 'danger'}>{integrity.checks.find(c => c.id === 'pair.code')?.level === 'pass' ? 'Code matches' : 'Mismatch'}</Badge> : null}</td>
+                  </tr>
+                </>
+              )}
+              {integrityError && <tr><td colSpan={4} style={{ color: 'var(--error)', fontSize: '0.78rem' }}>The governance check could not run: {integrityError}</td></tr>}
               <tr>
                 <td style={{ fontWeight: 700 }}>Artwork URI</td>
                 <td colSpan={3} style={{ fontSize: '0.78rem', wordBreak: 'break-all' }}>{DEPLOYED.ARTWORK_URI ?? local?.values.ARTWORK_URI ?? artwork?.uri ?? <span style={muted}>—</span>}</td>

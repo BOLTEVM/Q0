@@ -22,6 +22,7 @@ import {
   CONTRACTS,
   DEXES,
   REGISTERED_TOKENS,
+  TOKEN_REGISTRY,
   FARM_REGISTRY,
   MASTERCHEF_ADDRESS,
   DEPLOYED,
@@ -36,27 +37,34 @@ import {
   POOL_REGISTRY,
   CANDIDATE_POOLS,
   SWAP_ROUTES,
+  buildCrossDexRoutes,
   findPool,
   getPairAddress,
+  isDexLive,
   type PoolInfo,
+  type DexId,
   requireDex,
   discoverCircleswapPools,
   buildCircleswapRoutes,
   orientedPath,
+  orientedSegments,
   tokenAddress,
   quoteRoute,
+  quoteCrossDexRoute,
   parseUnits,
   formatUnits as formatBaseUnits,
   getTokenMetadata,
   getLPReserves,
   getLatestBlockNumber,
   getTokenBalance,
+  getAllowance,
   getQuaiBalance,
   quaiRpcCall,
   getTokenDetailV2,
   getQuainanceTVL,
   findQuainancePools,
   TokenMetadata,
+  type TokenInfo,
   LPReserves,
   TokenDetailV2,
   TokenTransferV2,
@@ -64,6 +72,11 @@ import {
 } from 'quai-service';
 import PoolModal from './PoolModal';
 import PairsPage from './PairsPage';
+import TokenPicker from './TokenPicker';
+import TokenBubble, { type TokenBubbleMetadata } from './TokenBubble';
+import ImportTokenModal from './ImportTokenModal';
+import TokenAnalyticsPage from './TokenAnalyticsPage';
+import { readImportedTokens, writeImportedTokens } from './customTokens';
 
 // The deploy tooling carries the contracts' creation bytecode and the quais SDK; it loads only when opened.
 const DeployPage = lazy(() => import('./DeployPage'));
@@ -74,6 +87,36 @@ import {
   getAuthorizedAccounts, 
   sendWalletTransaction 
 } from './providerUtils';
+
+const tokenMetadataCache = new Map<string, Promise<TokenBubbleMetadata | null>>();
+const showLegacyAnalytics = (): boolean => false;
+
+function loadTokenBubbleMetadata(token: TokenInfo): Promise<TokenBubbleMetadata | null> {
+  const key = token.address.toLowerCase();
+  const cached = tokenMetadataCache.get(key);
+  if (cached) return cached;
+
+  const request = Promise.allSettled([
+    getTokenMetadata(token.address),
+    getTokenDetailV2(token.address)
+  ]).then(([chainResult, explorerResult]) => {
+    const chainMetadata = chainResult.status === 'fulfilled' ? chainResult.value : null;
+    const explorerToken = explorerResult.status === 'fulfilled' ? explorerResult.value.token : null;
+    if (!chainMetadata && !explorerToken) return null;
+    return {
+      address: explorerToken?.contract_address ?? chainMetadata?.address ?? token.address,
+      name: explorerToken?.name?.trim() || chainMetadata?.name?.trim() || token.name,
+      symbol: explorerToken?.symbol?.trim() || chainMetadata?.symbol?.trim() || token.symbol,
+      decimals: explorerToken?.decimals ?? chainMetadata?.decimals ?? token.decimals,
+      totalSupply: chainMetadata?.totalSupply ?? explorerToken?.total_supply ?? '0',
+      iconUrl: explorerToken?.icon_url ?? token.iconUrl,
+      website: explorerToken?.website ?? undefined,
+      description: explorerToken?.description ?? token.description
+    } satisfies TokenBubbleMetadata;
+  });
+  tokenMetadataCache.set(key, request);
+  return request;
+}
 
 const getTabFromHash = (): 'SWAP' | 'FARMS' | 'QRB' | 'ANALYTICS' | 'PAIRS' | 'DEPLOY' => {
   const hash = typeof window !== 'undefined' ? window.location.hash.toLowerCase() : '';
@@ -97,6 +140,13 @@ export default function App() {
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  const navigateToTab = (tab: 'SWAP' | 'FARMS' | 'QRB' | 'ANALYTICS' | 'PAIRS' | 'DEPLOY') => {
+    setActiveTab(tab);
+    if (typeof window !== 'undefined') {
+      window.location.hash = '#' + tab.toLowerCase();
+    }
+  };
 
   // Wallet States
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
@@ -128,15 +178,61 @@ export default function App() {
   // Pools created after the registry was written (e.g. via the Create Pool modal), found by factory.getPair().
   const [discoveredPools, setDiscoveredPools] = useState<PoolInfo[]>([]);
   const [poolModalOpen, setPoolModalOpen] = useState<boolean>(false);
+  const [customTokens, setCustomTokens] = useState(() => readImportedTokens());
+  const [importTokenOpen, setImportTokenOpen] = useState(false);
+  const [contractMetadata, setContractMetadata] = useState<Record<string, TokenBubbleMetadata>>({});
+  const [contractMetadataStatus, setContractMetadataStatus] = useState<'loading' | 'ready' | 'partial' | 'failed'>('loading');
+  const tokenCatalog = [...REGISTERED_TOKENS, ...customTokens];
+  const tokenCatalogRef = useRef(tokenCatalog);
+  tokenCatalogRef.current = tokenCatalog;
+
+  // Keep imported metadata available to the shared route/quote helpers. The generated registry remains the
+  // source of built-ins; imported entries are browser-local additions only.
+  useEffect(() => {
+    for (const token of customTokens) TOKEN_REGISTRY[token.symbol] = token;
+    writeImportedTokens(customTokens);
+  }, [customTokens]);
+
+  // Read the live ERC-20 metadata so token bubbles stay tied to the deployed contract,
+  // including imported tokens that were not part of the generated registry. The explorer
+  // response fills in the richer display fields (logo/description) when available, while
+  // the chain response remains the source of truth for standard ERC-20 fields.
+  useEffect(() => {
+    let live = true;
+    const readableTokens = tokenCatalog.filter(token => token.deployed !== false && !token.isNative);
+    setContractMetadataStatus(readableTokens.length ? 'loading' : 'ready');
+    Promise.all(readableTokens.map(async token => [token.address.toLowerCase(), await loadTokenBubbleMetadata(token)] as const)).then(entries => {
+      if (!live) return;
+      const resolved = entries.filter((entry): entry is readonly [string, TokenBubbleMetadata] => entry[1] !== null);
+      setContractMetadata(Object.fromEntries(resolved));
+      setContractMetadataStatus(resolved.length === 0 ? 'failed' : resolved.length === readableTokens.length ? 'ready' : 'partial');
+    });
+    return () => {
+      live = false;
+    };
+  }, [customTokens]);
+
   const allPools: PoolInfo[] = [...POOL_REGISTRY, ...discoveredPools];
   const allPoolsRef = useRef<PoolInfo[]>(allPools);
   allPoolsRef.current = allPools;
+  const tokenLabel = (symbol: string) => TOKEN_REGISTRY[symbol]?.symbol ?? symbol;
+  const discoveredDirectRoutes = discoveredPools
+    .filter(pool => pool.dex !== 'CIRCLESWAP')
+    .filter(pool => !SWAP_ROUTES.some(route => route.dex === pool.dex && ((route.path[0] === pool.tokens[0] && route.path[route.path.length - 1] === pool.tokens[1]) || (route.path[0] === pool.tokens[1] && route.path[route.path.length - 1] === pool.tokens[0]))))
+    .map(pool => ({
+      id: `POOL_${pool.dex}_${pool.pair.toLowerCase()}`,
+      label: `${tokenLabel(pool.tokens[0])} / ${tokenLabel(pool.tokens[1])} (${DEXES[pool.dex].label})`,
+      dex: pool.dex,
+      path: [...pool.tokens]
+    }));
   // Circleswap's pools are created by users, so its routes are built from what the factory reports.
   const availableRoutes = [
     ...SWAP_ROUTES.filter(r =>
       !r.optional || r.path.slice(0, -1).every((sym, i) => findPool(r.dex, sym, r.path[i + 1], allPools))
     ),
-    ...buildCircleswapRoutes(discoveredPools)
+    ...discoveredDirectRoutes,
+    ...buildCircleswapRoutes(discoveredPools),
+    ...buildCrossDexRoutes(allPools)
   ];
   // Circleswap pools that exist but use a token this app does not list (so cannot be priced or shown).
   const [circleswapUnlisted, setCircleswapUnlisted] = useState<number>(0);
@@ -147,6 +243,7 @@ export default function App() {
   const [impactAck, setImpactAck] = useState<boolean>(false);
   const [routeId, setRouteId] = useState<string>(SWAP_ROUTES[0].id);
   const [reversed, setReversed] = useState<boolean>(false);
+  const [nativeQuaiSide, setNativeQuaiSide] = useState<'FROM' | 'TO' | null>(null);
   const [swapAmountIn, setSwapAmountIn] = useState<string>('');
   const [slippage, setSlippage] = useState<number>(1.0);
   const [swapLoading, setSwapLoading] = useState<boolean>(false);
@@ -190,6 +287,19 @@ export default function App() {
       pad(pathLen) +
       pathEncoded
     );
+  };
+
+  // Native QUAI uses the router's WQUAI boundary. Never encode the zero address as an ERC-20 path token.
+  const encodeRouterSwapExactETH = (amountOutMin: bigint, path: string[], to: string, deadline: bigint): string => {
+    const pad = (n: bigint | number, bits = 32) => BigInt(n).toString(16).padStart(bits * 2, '0');
+    const padAddr = (addr: string) => addr.replace('0x', '').toLowerCase().padStart(64, '0');
+    return '0x7ff36ab5' + pad(amountOutMin) + pad(0x80) + padAddr(to) + pad(deadline) + pad(path.length) + path.map(padAddr).join('');
+  };
+
+  const encodeRouterSwapExactTokensForETH = (amountIn: bigint, amountOutMin: bigint, path: string[], to: string, deadline: bigint): string => {
+    const pad = (n: bigint | number, bits = 32) => BigInt(n).toString(16).padStart(bits * 2, '0');
+    const padAddr = (addr: string) => addr.replace('0x', '').toLowerCase().padStart(64, '0');
+    return '0x18cbafe5' + pad(amountIn) + pad(amountOutMin) + pad(0xa0) + padAddr(to) + pad(deadline) + pad(path.length) + path.map(padAddr).join('');
   };
 
   const encodeApprove = (spender: string, amount: bigint): string => {
@@ -252,6 +362,39 @@ export default function App() {
           console.warn(`Pool discovery failed for ${cand.dex} ${cand.tokens.join('/')}:`, e);
         }
       }));
+
+      // Imported tokens are not part of the generated candidate list. Look for a direct pair against every
+      // known deployed token on the live external DEXes so an imported contract becomes tradable when its pool
+      // already exists, without guessing at a router or silently creating a pool.
+      const knownSymbols = [...new Set([
+        ...REGISTERED_TOKENS.filter(token => token.deployed !== false && !token.isNative).map(token => token.symbol),
+        ...customTokens.map(token => token.symbol)
+      ])];
+      const customCandidates: { dex: DexId; tokens: [string, string] }[] = [];
+      const customPairKeys = new Set<string>();
+      for (const custom of customTokens) {
+        for (const other of knownSymbols) {
+          if (custom.symbol === other) continue;
+          for (const dexId of (['QUAISWAP', 'QUAINANCE'] as DexId[])) {
+            const pairKey = `${dexId}:${[custom.symbol, other].sort().join('/')}`;
+            if (customPairKeys.has(pairKey)) continue;
+            customPairKeys.add(pairKey);
+            customCandidates.push({ dex: dexId, tokens: [custom.symbol, other] });
+          }
+        }
+      }
+      await Promise.all(customCandidates.map(async (cand) => {
+        if (!isDexLive(cand.dex)) return;
+        try {
+          const pair = await getPairAddress(cand.dex, cand.tokens[0], cand.tokens[1]);
+          if (!pair || POOL_REGISTRY.some(pool => pool.pair.toLowerCase() === pair.toLowerCase())) return;
+          if (found.some(pool => pool.pair.toLowerCase() === pair.toLowerCase())) return;
+          reservesMap[pair.toLowerCase()] = await getLPReserves(pair);
+          found.push({ ...cand, pair });
+        } catch (e) {
+          console.warn(`Imported token pool discovery failed for ${cand.dex} ${cand.tokens.join('/')}:`, e);
+        }
+      }));
       // Circleswap has no fixed pool list: ask its factory. A failure here must not hide the other DEXes.
       try {
         const cs = await discoverCircleswapPools();
@@ -287,7 +430,7 @@ export default function App() {
       setTopHolders(parsedHolders);
 
       try {
-        const tvl = await getQuainanceTVL(1, '/api-quai-v2');
+        const tvl = await getQuainanceTVL(1, import.meta.env.DEV ? '/api-quai-v2' : 'https://explorer.qu.ai');
         setQuainanceTvl(tvl);
       } catch (tvlErr) {
         console.error("Error loading Quainance TVL data:", tvlErr);
@@ -299,7 +442,7 @@ export default function App() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [customTokens]);
 
   useEffect(() => {
     fetchData();
@@ -311,7 +454,7 @@ export default function App() {
     const raw: Record<string, string> = {};
     const lp: Record<string, string> = {};
     await Promise.all([
-      ...REGISTERED_TOKENS.filter(tok => tok.deployed !== false).map(async (tok) => {
+      ...tokenCatalogRef.current.filter(tok => tok.deployed !== false).map(async (tok) => {
         try {
           raw[tok.symbol] = tok.isNative ? await getQuaiBalance(addr) : await getTokenBalance(tok.address, addr);
         } catch (e) {
@@ -332,7 +475,8 @@ export default function App() {
 
   const getBalanceForToken = (symbol: string) => {
     const raw = rawBalances[symbol];
-    return raw === undefined ? '—' : formatBaseUnits(BigInt(raw), 18, 6);
+    const decimals = TOKEN_REGISTRY[symbol]?.decimals ?? 18;
+    return raw === undefined ? '—' : formatBaseUnits(BigInt(raw), decimals, 6);
   };
 
   const quaiBalance = rawBalances['QUAI'] === undefined ? '—' : formatBaseUnits(BigInt(rawBalances['QUAI']), 18, 4);
@@ -351,7 +495,7 @@ export default function App() {
     if (walletAddress) {
       loadWalletBalances(walletAddress);
     }
-  }, [walletAddress, loadWalletBalances, discoveredPools]);
+  }, [walletAddress, loadWalletBalances, discoveredPools, customTokens]);
 
   useEffect(() => {
     let live = true;
@@ -438,22 +582,35 @@ export default function App() {
 
   // Swap quote, derived from live reserves on every render (no cached copy to go stale).
   const route = availableRoutes.find(r => r.id === routeId) ?? SWAP_ROUTES[0];
-  const swapPathSymbols = orientedPath(route, reversed);
-  const fromSymbol = swapPathSymbols[0];
-  const toSymbol = swapPathSymbols[swapPathSymbols.length - 1];
-  const dex = requireDex(route.dex);
+  const routeIsCrossDex = 'crossDex' in route;
+  const swapPathSymbols = routeIsCrossDex
+    ? (reversed ? [...route.path].reverse() : route.path)
+    : orientedPath(route, reversed);
+  const routeSegments = routeIsCrossDex
+    ? orientedSegments(route, reversed)
+    : [{ dex: route.dex, path: swapPathSymbols }];
+  const routeFromSymbol = swapPathSymbols[0];
+  const routeToSymbol = swapPathSymbols[swapPathSymbols.length - 1];
+  const fromSymbol = nativeQuaiSide === 'FROM' ? 'QUAI' : routeFromSymbol;
+  const toSymbol = nativeQuaiSide === 'TO' ? 'QUAI' : routeToSymbol;
+  const dex = requireDex(routeSegments[0].dex);
+  const routeDexLabels = [...new Set(routeSegments.map(segment => DEXES[segment.dex].label))].join(' → ');
+  const fromTokenDecimals = TOKEN_REGISTRY[fromSymbol]?.decimals ?? 18;
+  const toTokenDecimals = TOKEN_REGISTRY[toSymbol]?.decimals ?? 18;
 
   let amountInWei: bigint | null = null;
   let amountParseError: string | null = null;
   if (swapAmountIn) {
     try {
-      amountInWei = parseUnits(swapAmountIn);
+      amountInWei = parseUnits(swapAmountIn, fromTokenDecimals);
     } catch (e: any) {
       amountParseError = e.message;
     }
   }
   const quote = amountInWei && amountInWei > 0n
-    ? quoteRoute(route, reversed, amountInWei, poolReserves, slippage, allPools)
+    ? routeIsCrossDex
+      ? quoteCrossDexRoute(route, reversed, amountInWei, poolReserves, slippage, allPools)
+      : quoteRoute(route, reversed, amountInWei, poolReserves, slippage, allPools)
     : null;
   const fromBalanceRaw = rawBalances[fromSymbol];
   const insufficientBalance = amountInWei !== null && fromBalanceRaw !== undefined && BigInt(fromBalanceRaw) < amountInWei;
@@ -462,8 +619,8 @@ export default function App() {
   const HIGH_IMPACT_PCT = 10;
   const needsImpactAck = !!quote && quote.priceImpactPct >= HIGH_IMPACT_PCT;
 
-  const swapAmountOut = quote ? formatBaseUnits(quote.amountOut, 18, 6) : '';
-  const minReceived = quote ? formatBaseUnits(quote.minimumReceived, 18, 6) : '0';
+  const swapAmountOut = quote ? formatBaseUnits(quote.amountOut, toTokenDecimals, 6) : '';
+  const minReceived = quote ? formatBaseUnits(quote.minimumReceived, toTokenDecimals, 6) : '0';
   const priceImpact = quote ? quote.priceImpactPct.toFixed(2) + '%' : '0.00%';
   const execPrice = quote ? quote.executionPrice.toFixed(6) : '0';
 
@@ -477,6 +634,7 @@ export default function App() {
   const toggleSwapDirection = () => {
     setImpactAck(false);
     setReversed(r => !r);
+    setNativeQuaiSide(side => side === 'FROM' ? 'TO' : side === 'TO' ? 'FROM' : null);
     setSwapAmountIn('');
     setSwapError(null);
     setSwapTxHash(null);
@@ -516,50 +674,131 @@ export default function App() {
       return;
     }
 
+    let completedSegments = 0;
     try {
-      // Re-read the route's reserves right before signing so amountOutMin is not built from a stale page load.
+      // Re-read every hop's reserves right before signing so amountOutMin is not built from a stale page load.
       const hopPairs = new Set<string>();
-      for (let i = 0; i < swapPathSymbols.length - 1; i++) {
-        const pool = findPool(route.dex, swapPathSymbols[i], swapPathSymbols[i + 1], allPools);
-        if (!pool) throw new Error(`No ${dex.label} pool for ${swapPathSymbols[i]}/${swapPathSymbols[i + 1]}.`);
-        hopPairs.add(pool.pair);
+      for (const segment of routeSegments) {
+        for (let i = 0; i < segment.path.length - 1; i++) {
+          const pool = findPool(segment.dex, segment.path[i], segment.path[i + 1], allPools);
+          if (!pool) throw new Error(`No ${DEXES[segment.dex].label} pool for ${segment.path[i]}/${segment.path[i + 1]}.`);
+          hopPairs.add(pool.pair);
+        }
       }
       const fresh: Record<string, LPReserves> = { ...poolReserves };
       await Promise.all([...hopPairs].map(async pair => {
         fresh[pair.toLowerCase()] = await getLPReserves(pair);
       }));
       setPoolReserves(fresh);
-      const freshQuote = quoteRoute(route, reversed, amountInWei, fresh, slippage, allPools);
+      const freshQuote = routeIsCrossDex
+        ? quoteCrossDexRoute(route, reversed, amountInWei, fresh, slippage, allPools)
+        : quoteRoute(route, reversed, amountInWei, fresh, slippage, allPools);
       if (!freshQuote) throw new Error("Could not quote this swap from live reserves.");
 
-      const tokenInAddress = tokenAddress(fromSymbol);
-      const swapPath = swapPathSymbols.map(tokenAddress);
       const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
 
-      setPendingSwapStep('APPROVING');
-      console.log(`[Swap] Approving ${dex.label} router ${dex.router} to spend ${amountInWei}`);
-      const approveTx = await sendWalletTransaction(provider, {
-        from: walletAddress,
-        to: tokenInAddress,
-        data: encodeApprove(dex.router, amountInWei),
-        gas: '0x186a0'
-      });
-      await waitForTransaction(approveTx);
+      if (routeIsCrossDex) {
+        let segmentAmountIn = amountInWei;
+        for (const [segmentIndex, segment] of routeSegments.entries()) {
+          const segmentDex = requireDex(segment.dex);
+          const segmentRoute = { id: `segment_${segment.dex}`, label: segment.path.join(' / '), dex: segment.dex, path: segment.path };
+          const segmentQuote = quoteRoute(segmentRoute, false, segmentAmountIn, fresh, slippage, allPools);
+          if (!segmentQuote) throw new Error(`Could not quote the ${segmentDex.label} segment ${segment.path.join(' → ')}.`);
 
-      setPendingSwapStep('SWAPPING');
-      console.log(`[Swap] swapExactTokensForTokens via ${dex.label} path=${JSON.stringify(swapPath)}`);
-      // On Cyprus-1 a reverted transaction burns its whole gas limit, so the swap is simulated against the
-      // now-approved allowance first; if it would revert (slippage, dust pool, stale price) nothing is sent.
-      // The simulation also supplies the access list multi-contract calls need and a gas limit sized to the route.
-      const prepared = await prepareContractCall(
-        walletAddress,
-        dex.router,
-        encodeRouterSwap(amountInWei, freshQuote.minimumReceived, swapPath, walletAddress, deadline),
-        1.5
-      );
-      const swapTx = await sendWalletTransaction(provider, prepared.tx);
-      setSwapTxHash(swapTx);
-      await waitForTransaction(swapTx);
+          const nativeInput = fromSymbol === 'QUAI' && segmentIndex === 0;
+          const outputSymbol = segment.path[segment.path.length - 1];
+          const nativeOutput = toSymbol === 'QUAI' && segmentIndex === routeSegments.length - 1;
+          const outputToken = nativeOutput ? null : tokenAddress(outputSymbol);
+          const outputBefore = BigInt(nativeOutput ? await getQuaiBalance(walletAddress) : await getTokenBalance(outputToken!, walletAddress));
+          const inputToken = nativeInput ? null : tokenAddress(segment.path[0]);
+          if (inputToken) {
+            const allowance = await getAllowance(inputToken, walletAddress, segmentDex.router);
+            if (allowance < segmentAmountIn) {
+              setPendingSwapStep('APPROVING');
+              const approveTx = await sendWalletTransaction(provider, {
+                from: walletAddress,
+                to: inputToken,
+                data: encodeApprove(segmentDex.router, segmentAmountIn),
+                gas: '0x186a0'
+              });
+              await waitForTransaction(approveTx);
+            }
+          }
+
+          setPendingSwapStep('SWAPPING');
+          const segmentData = nativeInput
+            ? encodeRouterSwapExactETH(segmentQuote.minimumReceived, segment.path.map(tokenAddress), walletAddress, deadline)
+            : nativeOutput
+              ? encodeRouterSwapExactTokensForETH(segmentAmountIn, segmentQuote.minimumReceived, segment.path.map(tokenAddress), walletAddress, deadline)
+              : encodeRouterSwap(segmentAmountIn, segmentQuote.minimumReceived, segment.path.map(tokenAddress), walletAddress, deadline);
+          const prepared = await prepareContractCall(
+            walletAddress,
+            segmentDex.router,
+            segmentData,
+            1.5,
+            undefined,
+            nativeInput ? segmentAmountIn : 0n
+          );
+          const swapTx = await sendWalletTransaction(provider, prepared.tx);
+          setSwapTxHash(swapTx);
+          await waitForTransaction(swapTx);
+
+          // Native QUAI output is the terminal hop. Its wallet balance also moves down by gas, so a raw
+          // before/after balance delta would be an unreliable receipt check here.
+          if (nativeOutput) {
+            completedSegments++;
+            continue;
+          }
+
+          // Chain the confirmed balance delta into the next router; a quote is not guaranteed to be the exact
+          // output if the pool moved between the read and confirmation.
+          const outputAfter = BigInt(nativeOutput ? await getQuaiBalance(walletAddress) : await getTokenBalance(outputToken!, walletAddress));
+          const received = outputAfter - outputBefore;
+          if (received <= 0n) throw new Error(`The ${segmentDex.label} segment confirmed but no ${nativeOutput ? 'QUAI' : outputSymbol} was received.`);
+          segmentAmountIn = received;
+          completedSegments++;
+        }
+      } else {
+        const swapPath = swapPathSymbols.map(tokenAddress);
+        const nativeInput = fromSymbol === 'QUAI';
+        const nativeOutput = toSymbol === 'QUAI';
+        const tokenInAddress = nativeInput ? null : tokenAddress(routeFromSymbol);
+        if (tokenInAddress) {
+          const allowance = await getAllowance(tokenInAddress, walletAddress, dex.router);
+          if (allowance < amountInWei) {
+            setPendingSwapStep('APPROVING');
+            console.log(`[Swap] Approving ${dex.label} router ${dex.router} to spend ${amountInWei}`);
+            const approveTx = await sendWalletTransaction(provider, {
+              from: walletAddress,
+              to: tokenInAddress,
+              data: encodeApprove(dex.router, amountInWei),
+              gas: '0x186a0'
+            });
+            await waitForTransaction(approveTx);
+          }
+        }
+
+        setPendingSwapStep('SWAPPING');
+        const swapData = nativeInput
+          ? encodeRouterSwapExactETH(freshQuote.minimumReceived, swapPath, walletAddress, deadline)
+          : nativeOutput
+            ? encodeRouterSwapExactTokensForETH(amountInWei, freshQuote.minimumReceived, swapPath, walletAddress, deadline)
+            : encodeRouterSwap(amountInWei, freshQuote.minimumReceived, swapPath, walletAddress, deadline);
+        console.log(`[Swap] ${nativeInput ? 'swapExactETHForTokens' : nativeOutput ? 'swapExactTokensForETH' : 'swapExactTokensForTokens'} via ${dex.label} path=${JSON.stringify(swapPath)}`);
+        // On Cyprus-1 a reverted transaction burns its whole gas limit, so the swap is simulated against the
+        // now-approved allowance first; if it would revert (slippage, dust pool, stale price) nothing is sent.
+        const prepared = await prepareContractCall(
+          walletAddress,
+          dex.router,
+          swapData,
+          1.5,
+          undefined,
+          nativeInput ? amountInWei : 0n
+        );
+        const swapTx = await sendWalletTransaction(provider, prepared.tx);
+        setSwapTxHash(swapTx);
+        await waitForTransaction(swapTx);
+      }
 
       setPendingSwapStep('IDLE');
       setSwapAmountIn('');
@@ -572,7 +811,10 @@ export default function App() {
 
     } catch (e: any) {
       console.error("[Swap] Failed:", e);
-      setSwapError(parseSwapError(e));
+      const detail = parseSwapError(e);
+      setSwapError(routeIsCrossDex && completedSegments > 0
+        ? `${completedSegments} route segment${completedSegments === 1 ? '' : 's'} confirmed. The remaining route was not completed; your intermediate tokens remain in your wallet. ${detail}`
+        : detail);
       setPendingSwapStep('IDLE');
     } finally {
       setSwapLoading(false);
@@ -581,13 +823,47 @@ export default function App() {
 
 
 
-  const selectRoute = (id: string) => {
+  const selectRoute = (id: string, nativeSide: 'FROM' | 'TO' | null = null) => {
     setImpactAck(false);
     setRouteId(id);
     setReversed(false);
+    setNativeQuaiSide(nativeSide);
     setSwapAmountIn('');
     setSwapError(null);
     setSwapTxHash(null);
+  };
+
+  const handleImportedToken = (token: TokenInfo) => {
+    const existing = tokenCatalog.find(candidate => candidate.symbol.toLowerCase() === token.symbol.toLowerCase());
+    if (existing && existing.address.toLowerCase() !== token.address.toLowerCase()) {
+      setSwapError(`${token.symbol} is already used by another token in this app. Import it using its existing contract or choose a token with a different symbol.`);
+      setImportTokenOpen(false);
+      return;
+    }
+    if (!existing) setCustomTokens(tokens => [...tokens, token]);
+    setImportTokenOpen(false);
+    setSwapError(null);
+  };
+
+  const selectToken = (side: 'FROM' | 'TO', symbol: string) => {
+    const normalized = symbol === 'QUAI' ? 'WQUAI' : symbol;
+    const nextFrom = side === 'FROM' ? normalized : routeFromSymbol;
+    const nextTo = side === 'TO' ? normalized : routeToSymbol;
+    if (nextFrom === nextTo) {
+      setSwapError('Choose two different tokens.');
+      return;
+    }
+    const direct = availableRoutes.find(candidate => candidate.path[0] === nextFrom && candidate.path[candidate.path.length - 1] === nextTo);
+    const reverse = availableRoutes.find(candidate => candidate.path[0] === nextTo && candidate.path[candidate.path.length - 1] === nextFrom);
+    if (direct) {
+      selectRoute(direct.id, symbol === 'QUAI' ? side : nativeQuaiSide === side ? null : nativeQuaiSide);
+      setReversed(false);
+    } else if (reverse) {
+      selectRoute(reverse.id, symbol === 'QUAI' ? side : nativeQuaiSide === side ? null : nativeQuaiSide);
+      setReversed(true);
+    } else {
+      setSwapError(`No live route found for ${tokenLabel(nextFrom)} / ${tokenLabel(nextTo)}. Importing a token does not create a pool.`);
+    }
   };
 
   const formatAddr = (addr: string) => `${addr.slice(0, 6)}...${addr.slice(-4)}`;
@@ -667,37 +943,37 @@ export default function App() {
       <nav className="circleswap-nav">
         <button 
           className={`circleswap-nav-btn ${activeTab === 'SWAP' ? 'active' : ''}`} 
-          onClick={() => setActiveTab('SWAP')}
+          onClick={() => navigateToTab('SWAP')}
         >
           <ArrowUpDown size={16} /> Swap
         </button>
         <button 
           className={`circleswap-nav-btn ${activeTab === 'FARMS' ? 'active' : ''}`} 
-          onClick={() => setActiveTab('FARMS')}
+          onClick={() => navigateToTab('FARMS')}
         >
           <TrendingUp size={16} /> Farms & Pools
         </button>
         <button 
           className={`circleswap-nav-btn ${activeTab === 'QRB' ? 'active' : ''}`} 
-          onClick={() => setActiveTab('QRB')}
+          onClick={() => navigateToTab('QRB')}
         >
           <Sparkles size={16} /> Qrb Genesis
         </button>
         <button 
           className={`circleswap-nav-btn ${activeTab === 'ANALYTICS' ? 'active' : ''}`} 
-          onClick={() => setActiveTab('ANALYTICS')}
+          onClick={() => navigateToTab('ANALYTICS')}
         >
           <Activity size={16} /> Analytics & Ledger
         </button>
         <button 
           className={`circleswap-nav-btn ${activeTab === 'PAIRS' ? 'active' : ''}`} 
-          onClick={() => setActiveTab('PAIRS')}
+          onClick={() => navigateToTab('PAIRS')}
         >
           <Layers size={16} /> Pairs & Liquidity
         </button>
         <button 
           className={`circleswap-nav-btn ${activeTab === 'DEPLOY' ? 'active' : ''}`} 
-          onClick={() => setActiveTab('DEPLOY')}
+          onClick={() => navigateToTab('DEPLOY')}
         >
           <Rocket size={16} /> Deploy
         </button>
@@ -706,11 +982,17 @@ export default function App() {
       {/* Multi-Token Portfolio Ticker */}
       {walletAddress && (
         <div className="portfolio-ticker">
-          {REGISTERED_TOKENS.filter(t => t.deployed !== false).map(t => {
+           {tokenCatalog.filter(t => t.deployed !== false).map(t => {
             const bal = getBalanceForToken(t.symbol);
+             const liveMetadata = contractMetadata[t.address.toLowerCase()];
             return (
-              <div className="portfolio-chip" key={t.symbol}>
-                <span className="portfolio-chip-symbol">{t.symbol}</span>
+              <div
+                className="portfolio-chip"
+                key={t.symbol}
+                  title={`${liveMetadata?.name ?? t.name} · ${t.isNative ? 'Native Cyprus-1 asset' : t.address} · ${liveMetadata?.decimals ?? t.decimals} decimals`}
+              >
+                <TokenBubble token={t} metadata={liveMetadata} size="xs" />
+                <span className="portfolio-chip-symbol">{liveMetadata?.symbol ?? t.symbol}</span>
                 <span className="portfolio-chip-balance">{bal}</span>
               </div>
             );
@@ -735,34 +1017,50 @@ export default function App() {
 
       {/* TAB 1: SWAP MODULE */}
       {activeTab === 'SWAP' && (
-        <div style={{ maxWidth: '640px', margin: '0 auto 3rem auto' }}>
-          <div className="glass-card swap-card" style={{ borderColor: 'rgba(255, 51, 68, 0.25)' }}>
-            <div className="swap-title">
-              <ArrowUpDown size={22} style={{ color: 'var(--accent-plasma)' }} />
-              Circleswap AMM Router
+        <div className="swap-page-shell">
+          <div className="glass-card swap-card uniswap-swap-card" style={{ borderColor: 'rgba(255, 51, 68, 0.25)' }}>
+            <div className="swap-card-heading">
+              <div>
+                <div className="swap-eyebrow">Cyprus-1 · Swap</div>
+                <div className="swap-title"><ArrowUpDown size={20} style={{ color: 'var(--accent-plasma)' }} /> Trade tokens</div>
+              </div>
+              <button type="button" className="swap-settings-button" title="Swap settings" onClick={() => document.getElementById('swap-settings')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>•••</button>
             </div>
 
-            {/* Selector Tabs */}
-            <div className="pool-selector-tabs" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: '0.5rem' }}>
-              {availableRoutes.map(r => (
-                <button
-                  key={r.id}
-                  className={`pool-tab-btn ${routeId === r.id ? 'active' : ''}`}
-                  onClick={() => selectRoute(r.id)}
-                  title={`${DEXES[r.dex].label}: ${r.path.join(' → ')}`}
-                >
-                  {r.label}
-                </button>
-              ))}
-              <button
-                className="pool-tab-btn"
-                onClick={() => setPoolModalOpen(true)}
-                title="Create a new pool or add liquidity to an existing one"
-                style={{ borderStyle: 'dashed' }}
-              >
-                + Create Pool
+            <div className="swap-route-summary">
+              <div>
+                <span className="swap-summary-label">Best available route</span>
+                <strong>{tokenLabel(fromSymbol)} <span>→</span> {tokenLabel(toSymbol)}</strong>
+              </div>
+              <button type="button" className="swap-route-button" onClick={() => document.getElementById('route-options')?.toggleAttribute('open')}>
+                <span>{routeIsCrossDex ? 'Multi-DEX' : dex.label}</span><span>⌄</span>
               </button>
             </div>
+
+            <details id="route-options" className="swap-route-options">
+              <summary>Choose a route manually</summary>
+              <div className="pool-selector-tabs swap-route-grid">
+                {availableRoutes.map(r => (
+                  <button
+                    key={r.id}
+                    className={`pool-tab-btn ${routeId === r.id ? 'active' : ''}`}
+                    onClick={() => selectRoute(r.id)}
+                    title={`${'crossDex' in r ? r.segments.map(segment => DEXES[segment.dex].label).join(' → ') : DEXES[r.dex].label}: ${r.path.join(' → ')}`}
+                  >
+                    {r.path.map(tokenLabel).join(' → ')}<small>{'crossDex' in r ? 'Multi-DEX' : DEXES[r.dex].label}</small>
+                  </button>
+                ))}
+                <button className="pool-tab-btn route-create-button" onClick={() => setPoolModalOpen(true)} title="Create a new pool or add liquidity to an existing one">
+                  + Create Pool
+                </button>
+              </div>
+            </details>
+
+            {routeIsCrossDex && (
+              <div style={{ background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.35)', color: 'var(--accent-amber, #f59e0b)', padding: '0.7rem 0.85rem', borderRadius: '10px', fontSize: '0.76rem', lineHeight: 1.4, marginBottom: '1rem' }}>
+                This route crosses {routeDexLabels}. Each segment is a separate router transaction, so it is not atomic. The wallet will receive each intermediate token before the next segment is submitted; if you stop after a confirmed segment, your funds remain in your wallet.
+              </div>
+            )}
 
             {circleswapUnlisted > 0 && (
               <div className="dimmed-text" style={{ marginBottom: '0.75rem' }}>
@@ -771,16 +1069,16 @@ export default function App() {
             )}
 
             {/* Input In */}
-            <div className="swap-input-group">
+            <div className="swap-input-group uniswap-token-input">
               <div className="swap-input-header">
-                <span>From</span>
+                <span>You pay</span>
                 {walletAddress && (
                   <span>
                     Balance: {getBalanceForToken(fromSymbol)}
                     {fromBalanceRaw !== undefined && BigInt(fromBalanceRaw) > 0n && (
                       <button
                         type="button"
-                        onClick={() => handleAmountInChange(formatBaseUnits(BigInt(fromBalanceRaw), 18, 18))}
+                        onClick={() => handleAmountInChange(formatBaseUnits(BigInt(fromBalanceRaw), fromTokenDecimals, fromTokenDecimals))}
                         style={{ marginLeft: '0.5rem', background: 'transparent', border: '1px solid var(--panel-border)', color: 'var(--accent-plasma)', borderRadius: '4px', fontSize: '0.65rem', fontWeight: 700, cursor: 'pointer', padding: '0 0.35rem' }}
                       >
                         MAX
@@ -791,15 +1089,14 @@ export default function App() {
               </div>
               <div className="swap-input-row">
                 <input 
-                  type="number" 
+                  type="text"
+                  inputMode="decimal"
                   className="swap-field" 
                   placeholder="0.0" 
                   value={swapAmountIn}
                   onChange={(e) => handleAmountInChange(e.target.value)}
                 />
-                <div className="token-select-trigger">
-                  {fromSymbol}
-                </div>
+                <TokenPicker value={fromSymbol} tokens={tokenCatalog.filter(token => token.deployed !== false)} balance={getBalanceForToken(fromSymbol)} metadata={contractMetadata} metadataStatus={contractMetadataStatus} onChange={symbol => selectToken('FROM', symbol)} onImport={() => setImportTokenOpen(true)} />
               </div>
             </div>
 
@@ -811,9 +1108,9 @@ export default function App() {
             </div>
 
             {/* Input Out */}
-            <div className="swap-input-group">
+            <div className="swap-input-group uniswap-token-input">
               <div className="swap-input-header">
-                <span>To (Estimated)</span>
+                <span>You receive</span>
                 {walletAddress && (
                   <span>
                     Balance: {getBalanceForToken(toSymbol)}
@@ -822,23 +1119,21 @@ export default function App() {
               </div>
               <div className="swap-input-row">
                 <input 
-                  type="number" 
+                  type="text"
                   className="swap-field" 
                   placeholder="0.0" 
                   value={swapAmountOut}
                   readOnly 
                 />
-                <div className="token-select-trigger">
-                  {toSymbol}
-                </div>
+                <TokenPicker value={toSymbol} tokens={tokenCatalog.filter(token => token.deployed !== false)} balance={getBalanceForToken(toSymbol)} metadata={contractMetadata} metadataStatus={contractMetadataStatus} onChange={symbol => selectToken('TO', symbol)} onImport={() => setImportTokenOpen(true)} />
               </div>
             </div>
 
             {/* Detail Sheet */}
-            <div className="swap-details">
+            <div id="swap-settings" className="swap-details">
               <div className="swap-detail-row">
                 <span className="swap-detail-label">Execution Price</span>
-                <span className="swap-detail-value">{execPrice} {toSymbol} per {fromSymbol}</span>
+                <span className="swap-detail-value">{execPrice} {tokenLabel(toSymbol)} per {tokenLabel(fromSymbol)}</span>
               </div>
               <div className="swap-detail-row">
                 <span className="swap-detail-label">Price Impact</span>
@@ -848,7 +1143,7 @@ export default function App() {
               </div>
               <div className="swap-detail-row">
                 <span className="swap-detail-label">Minimum Received</span>
-                <span className="swap-detail-value">{minReceived} {toSymbol}</span>
+                <span className="swap-detail-value">{minReceived} {tokenLabel(toSymbol)}</span>
               </div>
               <div className="swap-detail-row" style={{ alignItems: 'center' }}>
                 <span className="swap-detail-label">Slippage Tolerance</span>
@@ -899,8 +1194,8 @@ export default function App() {
               <div style={{ background: 'rgba(0, 242, 254, 0.05)', border: '1px solid rgba(0, 242, 254, 0.15)', padding: '1rem', borderRadius: '14px', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
                 <div className="loader" style={{ width: '24px', height: '24px', borderWidth: '2px', margin: 0 }}></div>
                 <div style={{ fontSize: '0.8rem' }}>
-                  <strong>Step 1 of 2: Approving Router…</strong>
-                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Authorising the {dex.label} Router to spend your tokens</div>
+                  <strong>{routeIsCrossDex ? 'Approving route segment…' : 'Step 1 of 2: Approving Router…'}</strong>
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>{routeIsCrossDex ? `Authorising the next router in ${routeDexLabels}` : `Authorising the ${dex.label} Router to spend your tokens`}</div>
                 </div>
               </div>
             )}
@@ -910,8 +1205,8 @@ export default function App() {
               <div style={{ background: 'rgba(255, 51, 68, 0.08)', border: '1px solid rgba(255, 51, 68, 0.25)', padding: '1rem', borderRadius: '14px', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
                 <div className="loader" style={{ width: '24px', height: '24px', borderWidth: '2px', margin: 0, borderColor: 'rgba(255, 51, 68, 0.2)', borderTopColor: 'var(--accent-plasma)' }}></div>
                 <div style={{ fontSize: '0.8rem' }}>
-                  <strong>Step 2 of 2: Routing Swap Atomically…</strong>
-                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Executing swap via {dex.label} Router</div>
+                  <strong>{routeIsCrossDex ? 'Executing route segment…' : 'Step 2 of 2: Routing Swap Atomically…'}</strong>
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>{routeIsCrossDex ? `Swapping through ${routeDexLabels}` : `Executing swap via ${dex.label} Router`}</div>
                 </div>
               </div>
             )}
@@ -967,9 +1262,10 @@ export default function App() {
                 ? `Insufficient ${fromSymbol} balance`
                 : 'Confirm Swap'}
             </button>
-            <div className="dimmed-text">
-              Routed through the {dex.label} router on Cyprus-1 ({route.path.join(' → ')}).
-            </div>
+                <div className="swap-route-footer">
+                  <span>{routeIsCrossDex ? 'Multi-DEX route' : `${dex.label} route`}</span>
+                  <span>{route.path.map(tokenLabel).join(' → ')}</span>
+                </div>
           </div>
         </div>
       )}
@@ -1195,7 +1491,8 @@ export default function App() {
       )}
 
       {/* TAB 4: ANALYTICS & TRANSACTION LEDGER */}
-      {activeTab === 'ANALYTICS' && (
+      {activeTab === 'ANALYTICS' && <TokenAnalyticsPage latestBlock={latestBlock} pools={allPools} poolReserves={poolReserves} />}
+      {showLegacyAnalytics() && activeTab === 'ANALYTICS' && (
         <div>
           {/* Stats Cards Row */}
           <div className="stats-grid">
@@ -1575,6 +1872,12 @@ export default function App() {
             fetchData(true);
             if (walletAddress) loadWalletBalances(walletAddress);
           }}
+        />
+      )}
+      {importTokenOpen && (
+        <ImportTokenModal
+          onClose={() => setImportTokenOpen(false)}
+          onImported={handleImportedToken}
         />
       )}
     </div>

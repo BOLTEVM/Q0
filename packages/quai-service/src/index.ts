@@ -11,7 +11,7 @@ export * from './circleswap';
 export * from './pairs';
 export * from './eip1967';
 
-import { findPool, tokenAddress, orientedPath, type SwapRoute, type PoolInfo, POOL_REGISTRY } from './registries/pools';
+import { findPool, tokenAddress, orientedPath, type SwapRoute, type CrossDexRoute, type PoolInfo, POOL_REGISTRY, orientedSegments } from './registries/pools';
 import { clampSlippagePct } from './units';
 
 export const CONTRACTS = {
@@ -480,26 +480,17 @@ export interface RouteQuote {
     executionPrice: number;
 }
 
-/**
- * Quote a multi-hop exact-input swap against live reserves. Each hop is oriented from the pair's
- * on-chain token0, not from any assumed ordering. Returns null when a hop has no pool or no reserves.
- * `reservesByPair` is keyed by lower-cased pair address.
- */
-export function quoteRoute(
-    route: SwapRoute,
-    reversed: boolean,
+function quotePath(
+    dex: SwapRoute['dex'],
+    path: string[],
     amountIn: bigint,
     reservesByPair: Record<string, LPReserves | undefined>,
-    slippagePct: number,
-    pools: PoolInfo[] = POOL_REGISTRY
-): RouteQuote | null {
-    if (amountIn <= 0n) return null;
-    const path = orientedPath(route, reversed);
+    pools: PoolInfo[]
+): { amountOut: bigint; spot: number } | null {
     let amount = amountIn;
     let spot = 1;
-
     for (let i = 0; i < path.length - 1; i++) {
-        const pool = findPool(route.dex, path[i], path[i + 1], pools);
+        const pool = findPool(dex, path[i], path[i + 1], pools);
         const res = pool && reservesByPair[pool.pair.toLowerCase()];
         if (!pool || !res) return null;
 
@@ -519,12 +510,62 @@ export function quoteRoute(
         if (amount === 0n) return null;
         spot *= Number(reserveOut) / Number(reserveIn);
     }
+    return { amountOut: amount, spot };
+}
+
+/**
+ * Quote a multi-hop exact-input swap against live reserves. Each hop is oriented from the pair's
+ * on-chain token0, not from any assumed ordering. Returns null when a hop has no pool or no reserves.
+ * `reservesByPair` is keyed by lower-cased pair address.
+ */
+export function quoteRoute(
+    route: SwapRoute,
+    reversed: boolean,
+    amountIn: bigint,
+    reservesByPair: Record<string, LPReserves | undefined>,
+    slippagePct: number,
+    pools: PoolInfo[] = POOL_REGISTRY
+): RouteQuote | null {
+    if (amountIn <= 0n) return null;
+    const path = orientedPath(route, reversed);
+    const quoted = quotePath(route.dex, path, amountIn, reservesByPair, pools);
+    if (!quoted) return null;
+    const { amountOut: amount, spot } = quoted;
 
     const slippageFactor = 10000n - BigInt(Math.floor(clampSlippagePct(slippagePct) * 100));
     const executionPrice = Number(amount) / Number(amountIn);
     // Fee is part of the shortfall vs spot, matching how the single-hop simulator reports impact.
     const priceImpactPct = Math.max(0, (1 - executionPrice / spot) * 100);
 
+    return {
+        amountOut: amount,
+        minimumReceived: (amount * slippageFactor) / 10000n,
+        priceImpactPct,
+        executionPrice
+    };
+}
+
+/** Quote a route whose consecutive segments are settled by different DEX routers. */
+export function quoteCrossDexRoute(
+    route: CrossDexRoute,
+    reversed: boolean,
+    amountIn: bigint,
+    reservesByPair: Record<string, LPReserves | undefined>,
+    slippagePct: number,
+    pools: PoolInfo[] = POOL_REGISTRY
+): RouteQuote | null {
+    if (amountIn <= 0n) return null;
+    let amount = amountIn;
+    let spot = 1;
+    for (const segment of orientedSegments(route, reversed)) {
+        const quoted = quotePath(segment.dex, segment.path, amount, reservesByPair, pools);
+        if (!quoted) return null;
+        amount = quoted.amountOut;
+        spot *= quoted.spot;
+    }
+    const slippageFactor = 10000n - BigInt(Math.floor(clampSlippagePct(slippagePct) * 100));
+    const executionPrice = Number(amount) / Number(amountIn);
+    const priceImpactPct = Math.max(0, (1 - executionPrice / spot) * 100);
     return {
         amountOut: amount,
         minimumReceived: (amount * slippageFactor) / 10000n,

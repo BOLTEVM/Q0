@@ -1,19 +1,27 @@
 import { Interface } from "ethers";
 import type { Artifact } from "./artifacts";
 import type { ChainClient, TxReceipt } from "./chain";
+import { creationGasLimit } from "../../../quai-service/src/deploy/gas";
 
 export interface DeployOptions {
     label: string;
     /** false = simulate only: estimate gas and check funds, send nothing. */
     broadcast: boolean;
-    /** Creation gas on Quai is ~2.5x the simulator's estimate; a revert burns the whole limit. */
+    /** The limit is max(estimate x this, a floor from the code deposited); a revert burns the whole limit. See quai-service gas.ts. */
     gasMultiplier?: number;
+    /** Runtime bytes this creation leaves on chain, when more than the contract itself (a constructor that creates others). */
+    depositedBytes?: number;
     pollMs?: number;
     timeoutMs?: number;
     /** Blocks that must be built on top of the receipt's block before the deployment is accepted. */
     confirmations?: number;
     /** Chain-specific rule for a valid deployed address (e.g. must be a Cyprus-1 address). Throw to reject. */
     checkAddress?: (address: string) => void;
+    /**
+     * Called with the transaction hash the moment a transaction is sent, before waiting for it. Write it down: if the
+     * run dies while waiting, the next run settles THAT transaction instead of paying for a second copy.
+     */
+    onSent?: (txHash: string) => void;
     log?: (line: string) => void;
 }
 
@@ -74,8 +82,8 @@ export async function deployContract(
     } catch (e: any) {
         throw new Error(`${opts.label}: simulation failed, nothing sent: ${e.message}`);
     }
-    const multiplier = opts.gasMultiplier ?? 3;
-    const gasLimit = (estimatedGas * BigInt(Math.round(multiplier * 100))) / 100n;
+    const deposited = opts.depositedBytes ?? (artifact.deployedBytecode.length - 2) / 2;
+    const gasLimit = creationGasLimit(estimatedGas, deposited, (data.length - 2) / 2, opts.gasMultiplier);
     const gasPrice = await client.getGasPrice();
     const maxFee = gasLimit * gasPrice;
 
@@ -88,7 +96,23 @@ export async function deployContract(
     if (!opts.broadcast) return { dryRun: true, label: opts.label, estimatedGas, gasLimit, maxFee };
 
     const txHash = await client.sendCreate(data, gasLimit);
+    opts.onSent?.(txHash);
     log(`${opts.label}: sent ${txHash}`);
+    const settled = await settleCreate(client, artifact, txHash, opts);
+    return { dryRun: false, label: opts.label, estimatedGas, gasLimit, maxFee, ...settled };
+}
+
+/**
+ * Waits for an already-sent creation and turns it into a deployed contract: success receipt, the full address read off
+ * that receipt (never derived), the chain's address rule, and code of the compiled length at that address. Used right
+ * after sending and to finish a run that was interrupted while waiting.
+ */
+export async function settleCreate(
+    client: ChainClient,
+    artifact: Artifact,
+    txHash: string,
+    opts: DeployOptions
+): Promise<{ address: string; txHash: string; blockNumber: number; gasUsed: bigint }> {
     const receipt = await waitForReceipt(client, txHash, opts);
 
     const address = contractAddressFromReceipt(receipt, txHash);
@@ -104,18 +128,8 @@ export async function deployContract(
         throw new Error(`${opts.label}: code at ${address} is ${gotBytes} bytes, compiled runtime is ${expectedBytes}`);
     }
 
-    log(`${opts.label}: deployed at ${address} (block ${receipt.blockNumber}, gas ${receipt.gasUsed})`);
-    return {
-        dryRun: false,
-        label: opts.label,
-        estimatedGas,
-        gasLimit,
-        maxFee,
-        address,
-        txHash,
-        blockNumber: receipt.blockNumber,
-        gasUsed: receipt.gasUsed
-    };
+    opts.log?.(`${opts.label}: deployed at ${address} (block ${receipt.blockNumber}, gas ${receipt.gasUsed})`);
+    return { address, txHash, blockNumber: receipt.blockNumber, gasUsed: receipt.gasUsed };
 }
 
 /** Polls for a receipt, then waits for the requested confirmations and re-reads it to catch a reorg. */

@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ShieldCheck, ShieldAlert, ShieldQuestion, RefreshCw, Clock, Send } from 'lucide-react';
+import { ShieldCheck, ShieldAlert, ShieldQuestion, RefreshCw, Clock, Send, CheckCircle2, Circle } from 'lucide-react';
 import { DEPLOYED, quaiRpcCall, prepareContractCall, waitForReceipt, getLatestBlockNumber, createBatch } from 'quai-service';
+import { readLocalDeployments } from 'quai-service/bootstrap';
 import {
   makeReader,
   inspectAmm,
+  interfaceOf,
   listOperations,
   describeCall,
+  TIMELOCK_ROLES,
   OPS,
   scheduleTx,
   executeTx,
@@ -14,6 +17,7 @@ import {
   type QueuedOp,
   type GovOp,
   type GovTargets,
+  type TimelockRole,
   type Check
 } from 'quai-service/deploy';
 import { getQuaiProvider, sendWalletTransaction } from './providerUtils';
@@ -42,6 +46,10 @@ function rememberSalt(id: string, salt: string) {
   }
 }
 
+const ZERO = '0x0000000000000000000000000000000000000000';
+/** Operations that can reach funds or approvals: worth telling everyone about the moment they are queued. */
+const SENSITIVE = /UPGRADE EVERY POOL|Upgrade the router|Upgrade the factory|Transfer .* ownership/;
+
 const countdown = (readyAt: number, now: number) => {
   const d = readyAt - now;
   if (d <= 0) return 'ready';
@@ -57,8 +65,9 @@ interface Props {
 }
 
 export default function GovernanceModal({ walletAddress, onConnect, onClose }: Props) {
-  const factory = DEPLOYED.AMM_FACTORY;
-  const router = DEPLOYED.AMM_ROUTER;
+  const local = readLocalDeployments();
+  const factory = DEPLOYED.AMM_FACTORY ?? local?.values.AMM_FACTORY ?? null;
+  const router = DEPLOYED.AMM_ROUTER ?? local?.values.AMM_ROUTER ?? null;
   const [tab, setTab] = useState<Tab>('INTEGRITY');
   const [report, setReport] = useState<IntegrityReport | null>(null);
   const [checking, setChecking] = useState(false);
@@ -66,7 +75,9 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
   const [loadingOps, setLoadingOps] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyTx, setBusyTx] = useState<string | null>(null);
-  const [isProposer, setIsProposer] = useState(false);
+  const [roles, setRoles] = useState({ proposer: false, canceller: false });
+  const isProposer = roles.proposer;
+  const [preset, setPreset] = useState<string | null>(null);
   const alive = useRef(true);
   // Set true on every mount: StrictMode unmounts and remounts once, and the cleanup must not leave this false.
   useEffect(() => {
@@ -108,20 +119,20 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
     }
   }, [timelock]);
 
-  useEffect(() => { if (tab === 'QUEUE' || tab === 'PROPOSE') loadOps(); }, [tab, loadOps]);
+  // The queue is read once the timelock is known (so a pending upgrade is flagged on the first screen) and again on its tabs.
+  useEffect(() => { if (timelock && (ops === null || tab === 'QUEUE' || tab === 'PROPOSE')) loadOps(); }, [tab, loadOps, timelock]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Is the connected wallet a proposer? (Only proposers can queue or cancel; execution is open unless configured otherwise.)
+  // What may the connected wallet do? A proposer queues (and cancels); a guardian only cancels; execution is open unless it was closed.
   useEffect(() => {
-    if (!timelock || !walletAddress) { setIsProposer(false); return; }
+    if (!timelock || !walletAddress) { setRoles({ proposer: false, canceller: false }); return; }
     (async () => {
       try {
-        const { interfaceOf } = await import('quai-service/deploy');
         const iface = interfaceOf('CircleswapTimelock');
-        const role = iface.decodeFunctionResult('PROPOSER_ROLE', await reader.call(timelock, iface.encodeFunctionData('PROPOSER_ROLE')))[0];
-        const has = iface.decodeFunctionResult('hasRole', await reader.call(timelock, iface.encodeFunctionData('hasRole', [role, walletAddress])))[0];
-        if (alive.current) setIsProposer(Boolean(has));
+        const has = async (role: string) => Boolean(iface.decodeFunctionResult('hasRole', await reader.call(timelock, iface.encodeFunctionData('hasRole', [role, walletAddress])))[0]);
+        const [proposer, canceller] = await Promise.all([has(TIMELOCK_ROLES.proposer), has(TIMELOCK_ROLES.canceller)]);
+        if (alive.current) setRoles({ proposer, canceller });
       } catch {
-        if (alive.current) setIsProposer(false);
+        if (alive.current) setRoles({ proposer: false, canceller: false });
       }
     })();
   }, [timelock, walletAddress]);
@@ -146,7 +157,6 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
   };
 
   const now = Math.floor(Date.now() / 1000);
-  const delayText = report?.facts.timelockDelaySeconds ? `${report.facts.timelockDelaySeconds / 86_400} days` : '—';
 
   if (!factory) {
     return (
@@ -158,12 +168,25 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
 
   const verdictTone = report?.verdict === 'UNSAFE' ? 'danger' : report?.verdict === 'IMMUTABLE_POOLS' ? 'ok' : 'warn';
   const VerdictIcon = report?.verdict === 'UNSAFE' ? ShieldAlert : report ? ShieldCheck : ShieldQuestion;
+  const pendingSensitive = targets && ops ? ops.filter(o => (o.state === 'WAITING' || o.state === 'READY') && SENSITIVE.test(describeCall(o.target, o.data, targets))) : [];
+  const ownerLabel = (kind?: string, delay?: number) =>
+    kind === 'timelock' ? `Timelock · ${delay ? `${delay / 86_400} days` : '—'}` : kind === 'renounced' ? 'Nobody (permanent)' : kind === 'account' ? 'A single account' : kind === 'contract' ? 'Unknown contract' : '—';
+  const poolsFrozen = report?.facts.pairBeaconOwner?.toLowerCase() === ZERO;
+  const lifecycle = report
+    ? [
+        { done: report.verdict !== 'UNSAFE', title: 'Deployed and verified from the chain', detail: report.verdict === 'UNSAFE' ? 'Fix the failures above before anyone uses it.' : 'Code hashes, owners, delays and proxies all match the compiled contracts.' },
+        { done: report.facts.pools.total > 0, title: 'First pools created', detail: report.facts.pools.total > 0 ? `${report.facts.pools.total} pool(s) so far.` : 'Create them from the liquidity modal, at the market ratio: the first deposit sets the price.' },
+        { done: poolsFrozen, title: 'Pool code frozen (optional, irreversible)', detail: poolsFrozen ? 'Nobody can ever change the code of existing pools.' : 'Do this when the pool code is final. It makes every existing pool untouchable, even by a future factory upgrade. It also means a bug in the pool code could never be fixed in those pools.', action: poolsFrozen ? undefined : { label: 'Queue the freeze', kind: 'freezePools' } },
+        { done: report.facts.routerOwnerKind === 'renounced', title: 'Router permanent (optional, irreversible)', detail: report.facts.routerOwnerKind === 'renounced' ? 'The router can never be replaced.' : 'The router holds users\' approvals, so its upgrades are the sensitive ones. Making it permanent removes that power for good; a new router can still be deployed at a new address.', action: report.facts.routerOwnerKind === 'renounced' || !router ? undefined : { label: 'Queue it', kind: 'makeRouterPermanent' } }
+      ]
+    : [];
+  const reportJson = report ? JSON.stringify({ chain: 'Quai Cyprus-1', checkedAt: new Date().toISOString(), factory, router, verdict: report.verdict, summary: report.summary, facts: report.facts, checks: report.checks }, null, 2) : '';
 
   return (
     <Modal title="Governance & integrity" icon={<ShieldCheck size={20} style={{ color: 'var(--accent-plasma)' }} />} onClose={onClose} locked={busyTx !== null} maxWidth={760}>
       <div role="tablist" style={{ display: 'flex', gap: '0.4rem', marginBottom: '1rem' }}>
         {([['INTEGRITY', 'Integrity check'], ['QUEUE', 'Pending changes'], ['PROPOSE', 'Propose a change']] as const).map(([k, label]) => (
-          <button key={k} role="tab" aria-selected={tab === k} type="button" onClick={() => setTab(k)} style={{ ...smallBtn, flex: 1, justifyContent: 'center', borderColor: tab === k ? 'var(--accent-plasma)' : 'var(--panel-border)', background: tab === k ? 'rgba(255, 51, 68, 0.12)' : smallBtn.background }}>
+          <button key={k} role="tab" aria-selected={tab === k} type="button" onClick={() => { setTab(k); setError(null); }} style={{ ...smallBtn, flex: 1, justifyContent: 'center', borderColor: tab === k ? 'var(--accent-plasma)' : 'var(--panel-border)', background: tab === k ? 'rgba(255, 51, 68, 0.12)' : smallBtn.background }}>
             {label}
           </button>
         ))}
@@ -175,7 +198,10 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
         <div>
           <div style={{ ...row, alignItems: 'center', marginBottom: '0.6rem' }}>
             <div style={{ ...muted, fontSize: '0.78rem' }}>Read from the chain just now. Nothing here is taken from this app&apos;s own records.</div>
-            <button type="button" style={smallBtn} onClick={check} disabled={checking}>{checking ? <Spinner /> : <RefreshCw size={12} />} Re-check</button>
+            <div style={{ display: 'flex', gap: '0.4rem' }}>
+              {report && <CopyButton text={reportJson} label="Copy report" />}
+              <button type="button" style={smallBtn} onClick={check} disabled={checking}>{checking ? <Spinner /> : <RefreshCw size={12} />} Re-check</button>
+            </div>
           </div>
           {!report && checking && <div style={{ padding: '1.5rem', textAlign: 'center' }}><Spinner /> Inspecting the proxies, the timelock, the pool beacon and every pool…</div>}
           {report && (
@@ -187,11 +213,32 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
                 </div>
                 {report.summary}
               </Notice>
+              {pendingSensitive.length > 0 && (
+                <Notice tone="warn">
+                  <strong>{pendingSensitive.length} queued change{pendingSensitive.length === 1 ? '' : 's'} can reach funds or approvals.</strong> {pendingSensitive.length === 1 ? 'It is' : 'They are'} public until {pendingSensitive.length === 1 ? 'it runs' : 'they run'}; if you do not trust the new code, withdraw liquidity and revoke router approvals before then.{' '}
+                  <button type="button" style={smallBtn} onClick={() => setTab('QUEUE')}>Review</button>
+                </Notice>
+              )}
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '0.6rem', marginBottom: '0.9rem' }}>
-                <div style={box}><div style={{ ...muted, fontSize: '0.7rem' }}>OWNER</div><div style={{ fontWeight: 700 }}>{report.facts.ownerKind === 'timelock' ? `Timelock · ${delayText}` : report.facts.ownerKind === 'renounced' ? 'Nobody (permanent)' : report.facts.ownerKind === 'account' ? 'A single account' : report.facts.ownerKind === 'contract' ? 'Unknown contract' : '—'}</div>{report.facts.owner && <AddrLink address={report.facts.owner} />}</div>
+                <div style={box}><div style={{ ...muted, fontSize: '0.7rem' }}>FACTORY OWNER</div><div style={{ fontWeight: 700 }}>{ownerLabel(report.facts.ownerKind, report.facts.timelockDelaySeconds)}</div>{report.facts.owner && report.facts.owner.toLowerCase() !== ZERO && <AddrLink address={report.facts.owner} />}</div>
+                {router && <div style={box}><div style={{ ...muted, fontSize: '0.7rem' }}>ROUTER OWNER</div><div style={{ fontWeight: 700 }}>{ownerLabel(report.facts.routerOwnerKind, report.facts.routerTimelockDelaySeconds)}</div>{report.facts.routerOwner && report.facts.routerOwner.toLowerCase() !== ZERO && <AddrLink address={report.facts.routerOwner} />}</div>}
                 <div style={box}><div style={{ ...muted, fontSize: '0.7rem' }}>POOL CODE</div><div style={{ fontWeight: 700 }}>{report.facts.pairBeaconOwner && report.facts.pairBeaconOwner.toLowerCase() === '0x0000000000000000000000000000000000000000' ? 'Frozen forever' : 'Upgradable via timelock'}</div>{report.facts.pairImpl && <AddrLink address={report.facts.pairImpl} />}</div>
                 <div style={box}><div style={{ ...muted, fontSize: '0.7rem' }}>POOLS EXAMINED</div><div style={{ fontWeight: 700 }}>{report.facts.pools.checked} of {report.facts.pools.total}</div><div style={{ ...muted, fontSize: '0.72rem' }}>{report.facts.pools.frozen} frozen · {report.facts.pools.governed} timelocked · {report.facts.pools.foreign} outside</div></div>
+              </div>
+
+              <div style={{ ...box, marginBottom: '0.9rem' }}>
+                <div style={{ fontWeight: 800, fontSize: '0.82rem', marginBottom: '0.4rem' }}>Where this stands</div>
+                {lifecycle.map(step => (
+                  <div key={step.title} style={{ display: 'flex', gap: '0.55rem', alignItems: 'flex-start', marginBottom: '0.45rem' }}>
+                    {step.done ? <CheckCircle2 size={16} style={{ color: 'var(--success)', flexShrink: 0, marginTop: 1 }} /> : <Circle size={16} style={{ color: 'var(--text-dim)', flexShrink: 0, marginTop: 1 }} />}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: '0.8rem' }}>{step.title}</div>
+                      <div style={{ ...muted, fontSize: '0.74rem' }}>{step.detail}</div>
+                    </div>
+                    {'action' in step && step.action && <button type="button" style={smallBtn} onClick={() => { setPreset(step.action!.kind); setTab('PROPOSE'); }}>{step.action.label}</button>}
+                  </div>
+                ))}
               </div>
 
               <div className="table-wrapper">
@@ -227,7 +274,7 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
               {ops && ops.length === 0 && <div style={{ ...muted, padding: '1rem' }}>Nothing has been scheduled recently.</div>}
               {ops?.map(o => {
                 const text = describeCall(o.target, o.data, targets);
-                const sensitive = /UPGRADE EVERY POOL|Upgrade the router|Upgrade the factory/.test(text);
+                const sensitive = SENSITIVE.test(text);
                 const active = o.state === 'WAITING' || o.state === 'READY';
                 return (
                   <div key={o.id} style={{ ...box, marginBottom: '0.5rem', borderColor: active && sensitive ? 'var(--warning)' : 'var(--panel-border)' }}>
@@ -247,7 +294,7 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
                             {busyTx === 'execute' ? <Spinner /> : <Send size={12} />} Execute
                           </button>
                         )}
-                        <button type="button" style={smallBtn} disabled={!isProposer || busyTx !== null} title={isProposer ? undefined : 'Only a proposer can cancel'} onClick={async () => { if (await send('cancel', cancelTx(targets.timelock, o.id))) loadOps(); }}>
+                        <button type="button" style={smallBtn} disabled={!roles.canceller || busyTx !== null} title={roles.canceller ? undefined : 'Only a proposer or a guardian can cancel'} onClick={async () => { if (await send('cancel', cancelTx(targets.timelock, o.id))) loadOps(); }}>
                           {busyTx === 'cancel' ? <Spinner /> : null} Cancel
                         </button>
                         <CopyButton text={JSON.stringify({ to: targets.timelock, id: o.id, target: o.target, data: o.data, salt: o.salt ?? null })} label="Copy details" />
@@ -262,14 +309,14 @@ export default function GovernanceModal({ walletAddress, onConnect, onClose }: P
       )}
 
       {tab === 'PROPOSE' && (
-        <Propose targets={targets} delaySeconds={report?.facts.timelockDelaySeconds ?? 0} walletAddress={walletAddress} onConnect={onConnect} isProposer={isProposer} busy={busyTx !== null} onSend={async (_op, tx, salt, id) => { const ok = await send('schedule', tx); if (ok) { rememberSalt(id, salt); loadOps(); } return ok; }} />
+        <Propose targets={targets} delaySeconds={report?.facts.timelockDelaySeconds ?? 0} walletAddress={walletAddress} onConnect={onConnect} isProposer={isProposer} busy={busyTx !== null} preset={preset} onPresetUsed={() => setPreset(null)} onSend={async (_op, tx, salt, id) => { const ok = await send('schedule', tx); if (ok) { rememberSalt(id, salt); loadOps(); } return ok; }} />
       )}
     </Modal>
   );
 }
 
 type Kind = keyof typeof OPS;
-const KINDS: { kind: Kind; label: string; arg?: { label: string; placeholder: string } }[] = [
+const KINDS: { kind: Kind; label: string; arg?: { label: string; placeholder: string }; role?: boolean }[] = [
   { kind: 'setFeeTo', label: 'Set the protocol fee recipient', arg: { label: 'Recipient (blank turns the fee off)', placeholder: '0x00…' } },
   { kind: 'upgradePools', label: 'Upgrade every pool (reaches liquidity)', arg: { label: 'New pool implementation', placeholder: '0x00…' } },
   { kind: 'freezePools', label: 'Freeze pool upgrades forever' },
@@ -278,20 +325,38 @@ const KINDS: { kind: Kind; label: string; arg?: { label: string; placeholder: st
   { kind: 'upgradeFactory', label: 'Upgrade the factory', arg: { label: 'New factory implementation', placeholder: '0x00…' } },
   { kind: 'makeRouterPermanent', label: 'Make the router permanent' },
   { kind: 'makeFactoryPermanent', label: 'Make the factory permanent' },
+  { kind: 'grantRole', label: 'Give someone a role on the timelock', arg: { label: 'Account', placeholder: '0x00…' }, role: true },
+  { kind: 'revokeRole', label: 'Remove someone\'s role on the timelock', arg: { label: 'Account', placeholder: '0x00…' }, role: true },
   { kind: 'updateDelay', label: 'Change the timelock delay', arg: { label: 'New delay in days (1 to 30)', placeholder: '3' } }
 ];
+const ROLE_LABEL: Record<TimelockRole, string> = {
+  proposer: 'Proposer: can queue changes',
+  canceller: 'Guardian: can veto a queued change, nothing else',
+  executor: 'Executor: can run a ready change'
+};
 
-function Propose({ targets, delaySeconds, walletAddress, onConnect, isProposer, busy, onSend }: {
+function Propose({ targets, delaySeconds, walletAddress, onConnect, isProposer, busy, preset, onPresetUsed, onSend }: {
   targets: GovTargets | null;
   delaySeconds: number;
   walletAddress: string | null;
   onConnect: () => void;
   isProposer: boolean;
   busy: boolean;
+  /** A kind to start on (from a "where this stands" shortcut). */
+  preset?: string | null;
+  onPresetUsed?: () => void;
   onSend: (op: GovOp, tx: { to: string; data: string }, salt: string, id: string) => Promise<boolean>;
 }) {
-  const [kind, setKind] = useState<Kind>('setFeeTo');
+  const [kind, setKind] = useState<Kind>((preset as Kind) ?? 'setFeeTo');
   const [arg, setArg] = useState('');
+  const [role, setRole] = useState<TimelockRole>('canceller');
+  useEffect(() => {
+    if (preset && KINDS.some(k => k.kind === preset)) {
+      setKind(preset as Kind);
+      setArg('');
+    }
+    if (preset) onPresetUsed?.();
+  }, [preset]); // eslint-disable-line react-hooks/exhaustive-deps
   const [ack, setAck] = useState(false);
   const [scheduled, setScheduled] = useState<{ id: string; salt: string } | null>(null);
   const spec = KINDS.find(k => k.kind === kind)!;
@@ -306,6 +371,8 @@ function Propose({ targets, delaySeconds, walletAddress, onConnect, isProposer, 
         : kind === 'freezePools' ? OPS.freezePools(t)
         : kind === 'makeRouterPermanent' ? OPS.makeRouterPermanent(t)
         : kind === 'makeFactoryPermanent' ? OPS.makeFactoryPermanent(t)
+        : kind === 'grantRole' ? OPS.grantRole(t, role, arg.trim())
+        : kind === 'revokeRole' ? OPS.revokeRole(t, role, arg.trim())
         : kind === 'upgradePools' ? OPS.upgradePools(t, arg.trim())
         : kind === 'newPoolVersion' ? OPS.newPoolVersion(t, arg.trim())
         : kind === 'upgradeRouter' ? OPS.upgradeRouter(t, arg.trim())
@@ -314,11 +381,11 @@ function Propose({ targets, delaySeconds, walletAddress, onConnect, isProposer, 
     } catch (e: any) {
       return { op: null, error: arg ? e?.message ?? String(e) : null };
     }
-  }, [targets, kind, arg]);
+  }, [targets, kind, arg, role]);
 
   const prepared = useMemo(() => (built.op && delaySeconds ? scheduleTx(targets!.timelock, built.op, delaySeconds) : null), [built.op, delaySeconds, targets]);
   // A fresh salt per attempt; reset acknowledgement when the operation changes.
-  useEffect(() => { setAck(false); setScheduled(null); }, [kind, arg]);
+  useEffect(() => { setAck(false); setScheduled(null); }, [kind, arg, role]);
 
   if (!targets) return <Notice tone="warn">Changes can only be proposed when the owner is a Circleswap timelock.</Notice>;
   const needsAck = built.op && built.op.risk !== 'routine';
@@ -331,6 +398,13 @@ function Propose({ targets, delaySeconds, walletAddress, onConnect, isProposer, 
           {KINDS.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
         </select>
       </Field>
+      {spec.role && (
+        <Field label="Role">
+          <select style={{ ...input, padding: '0.45rem' }} value={role} onChange={e => setRole(e.target.value as TimelockRole)} aria-label="Role">
+            {(Object.keys(ROLE_LABEL) as TimelockRole[]).map(r => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
+          </select>
+        </Field>
+      )}
       {spec.arg && (
         <Field label={spec.arg.label}>
           <input style={input} value={arg} onChange={e => setArg(e.target.value)} placeholder={spec.arg.placeholder} spellCheck={false} aria-label={spec.arg.label} />

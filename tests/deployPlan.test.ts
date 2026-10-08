@@ -21,6 +21,7 @@ import {
     saveProgress,
     projectCreationGas,
     creationBytes,
+    creationGasLimit,
     StepError,
     type KeyValueStore,
     type RunnerEnv,
@@ -28,6 +29,9 @@ import {
     type Flow
 } from '../packages/quai-service/src/deploy';
 import { CIRCLESWAP_RUNTIME_BYTES } from '../packages/quai-service/src/generated/circleswapRuntimeSizes';
+import { CIRCLESWAP_RUNTIME_HASHES } from '../packages/quai-service/src/generated/circleswapRuntimeHashes';
+import { normalizedCodeHash, stripMetadata, zeroImmutables } from '../packages/quai-service/src/codeHash';
+import { matchCode } from '../packages/quai-service/src/deploy/code';
 import { DEPLOYED } from '../packages/quai-service/src/registries/deployed';
 import {
     applyVerifiedLocalDeployments,
@@ -64,6 +68,73 @@ describe('generated artifacts', () => {
             expect(CIRCLESWAP_ARTIFACTS[name].runtimeBytes).toBe((a.deployedBytecode.length - 2) / 2);
             expect(CIRCLESWAP_RUNTIME_BYTES[name]).toBe(CIRCLESWAP_ARTIFACTS[name].runtimeBytes);
         }
+    });
+});
+
+describe('exact-code comparison (a padded imitation must not pass)', () => {
+    const real = (name: string) => loadArtifact(name).deployedBytecode;
+    const flipAt = (code: string, byte: number) => {
+        const at = 2 + byte * 2;
+        return code.slice(0, at) + (parseInt(code.slice(at, at + 2), 16) ^ 1).toString(16).padStart(2, '0') + code.slice(at + 2);
+    };
+
+    test('the generated fingerprint is exactly what the compiled code hashes to, for every contract', () => {
+        for (const name of Object.keys(CIRCLESWAP_RUNTIME_HASHES) as (keyof typeof CIRCLESWAP_RUNTIME_HASHES)[]) {
+            const h = CIRCLESWAP_RUNTIME_HASHES[name];
+            expect(normalizedCodeHash(real(name), h.immutables)).toBe(h.hash);
+        }
+    });
+
+    test('immutable values written by a constructor do not change the hash, but a changed instruction does', () => {
+        const name = 'CircleswapFactory';
+        const h = CIRCLESWAP_RUNTIME_HASHES[name];
+        expect(h.immutables.length).toBeGreaterThan(0); // UUPS keeps address(this) as an immutable
+        let deployed = real(name);
+        for (const [start, length] of h.immutables) {
+            deployed = deployed.slice(0, 2 + start * 2) + 'ab'.repeat(length) + deployed.slice(2 + (start + length) * 2); // what the constructor writes
+        }
+        expect(deployed).not.toBe(real(name));
+        expect(normalizedCodeHash(deployed, h.immutables)).toBe(h.hash);
+        // ...whereas a change to the code itself is caught, even at the same length
+        const tampered = flipAt(real(name), 50);
+        expect(tampered.length).toBe(real(name).length);
+        expect(normalizedCodeHash(tampered, h.immutables)).not.toBe(h.hash);
+    });
+
+    test('the metadata trailer is not part of the fingerprint (it encodes source paths and line endings, not behaviour)', () => {
+        const name = 'CircleswapTimelock';
+        const code = real(name);
+        const trailer = parseInt(code.slice(-4), 16) + 2; // bytes: CBOR data plus its 2-byte length
+        expect(trailer).toBeGreaterThan(10);
+        expect(trailer).toBeLessThan(200);
+        const retagged = code.slice(0, 2 + (code.length - 2 - trailer * 2)) + 'cd'.repeat(trailer - 2) + code.slice(-4);
+        expect(retagged).not.toBe(code);
+        expect(normalizedCodeHash(retagged)).toBe(normalizedCodeHash(code));
+        // but a byte just before the trailer is code, and counts
+        const bodyEnd = (code.length - 2) / 2 - trailer - 1;
+        expect(normalizedCodeHash(flipAt(code, bodyEnd))).not.toBe(normalizedCodeHash(code));
+    });
+
+    test('code that is too short, or has no valid trailer, is hashed whole rather than guessed at', () => {
+        expect(stripMetadata('0x')).toBe('0x');
+        expect(stripMetadata('0x00')).toBe('0x00');
+        expect(stripMetadata('0x6080ffff')).toBe('0x6080ffff'); // claims a 65,535-byte trailer: not a trailer
+        expect(() => stripMetadata('not hex')).toThrow('not a hex string');
+        expect(zeroImmutables('0x1122', [[5, 32]])).toBe('0x1122'); // a range beyond the code: left for the comparison to reject
+    });
+
+    test('an on-chain comparison reports missing, wrong-length, imitation and genuine code distinctly', async () => {
+        const reader = (code: string) => ({ getCode: async () => code });
+        const name = 'CircleswapRouter';
+        const code = real(name);
+        expect((await matchCode(reader('0x'), name, '0x')).state).toBe('missing');
+        expect((await matchCode(reader(code.slice(0, -2)), name, '0x')).state).toBe('wrong-size');
+        expect((await matchCode(reader(flipAt(code, 50)), name, '0x')).state).toBe('wrong-code');
+        let live = code;
+        for (const [start, length] of CIRCLESWAP_RUNTIME_HASHES[name].immutables) {
+            live = live.slice(0, 2 + start * 2) + '11'.repeat(length) + live.slice(2 + (start + length) * 2);
+        }
+        expect((await matchCode(reader(live), name, '0x')).state).toBe('ok');
     });
 });
 
@@ -181,6 +252,9 @@ interface FakeChain {
     pendingMined: Map<string, () => void>;
 }
 
+const ifaces: Record<string, Interface> = {};
+const iface = (n: string) => (ifaces[n] ??= new Interface((CIRCLESWAP_ARTIFACTS as any)[n].abi));
+
 function fakeChain(): FakeChain {
     const chain: FakeChain = {
         sent: [],
@@ -195,8 +269,6 @@ function fakeChain(): FakeChain {
         rpc: async () => null,
         wallet: { request: async () => null }
     };
-    const ifaces: Record<string, Interface> = {};
-    const iface = (n: string) => (ifaces[n] ??= new Interface((CIRCLESWAP_ARTIFACTS as any)[n].abi));
 
     const handlers: Record<string, Handler> = {
         quai_gasPrice: () => '0x3b9aca00',
@@ -218,9 +290,10 @@ function fakeChain(): FakeChain {
             }
             return '0x' + '00'.repeat(32);
         },
+        // The verifiers compare the exact compiled code, so the fake chain serves the real runtime bytecode.
         quai_getCode: ([address]) => {
             const c = chain.contracts.get(address.toLowerCase());
-            return c ? '0x' + '00'.repeat(CIRCLESWAP_ARTIFACTS[c.name].runtimeBytes) : '0x';
+            return c ? loadArtifact(c.name).deployedBytecode : '0x';
         },
         quai_call: ([tx]) => {
             let c = chain.contracts.get(tx.to.toLowerCase());
@@ -305,6 +378,7 @@ function stateFor(name: string, args: any[], chain: FakeChain, contractAddress?:
             const delay = BigInt(args[0]);
             const proposers = ((args[1] as string[]) || []).map((x: string) => x.toLowerCase());
             const executors = ((args[2] as string[]) || []).map((x: string) => x.toLowerCase());
+            const guardians = ((args[3] as string[]) || []).map((x: string) => x.toLowerCase());
             const PROPOSER = id('PROPOSER_ROLE');
             const CANCELLER = id('CANCELLER_ROLE');
             const EXECUTOR = id('EXECUTOR_ROLE');
@@ -319,7 +393,8 @@ function stateFor(name: string, args: any[], chain: FakeChain, contractAddress?:
                     const r = role.toLowerCase();
                     const a = account.toLowerCase();
                     if (r === ADMIN.toLowerCase()) return a === (contractAddress ?? '').toLowerCase();
-                    if (r === PROPOSER.toLowerCase() || r === CANCELLER.toLowerCase()) return proposers.includes(a);
+                    if (r === PROPOSER.toLowerCase()) return proposers.includes(a);
+                    if (r === CANCELLER.toLowerCase()) return proposers.includes(a) || guardians.includes(a);
                     if (r === EXECUTOR.toLowerCase()) return executors.includes(a) || executors.includes(ZeroAddress.toLowerCase());
                     return false;
                 }
@@ -440,7 +515,8 @@ describe('runFlow on a simulated chain', () => {
         expect(qrbTx.accessList).toBeUndefined();
         expect(mintTx.accessList?.length).toBeGreaterThan(0);
         const est = (t: any) => BigInt(t.data.length * 50);
-        expect(BigInt(qrbTx.gas)).toBe((est(qrbTx) * 300n) / 100n);
+        // 3x the simulator's figure, or the floor from the code the creation deposits, whichever is larger
+        expect(BigInt(qrbTx.gas)).toBe(creationGasLimit(est(qrbTx), CIRCLESWAP_ARTIFACTS.Qrb.runtimeBytes, (qrbTx.data.length - 2) / 2));
         expect(BigInt(mintTx.gas)).toBe((est(mintTx) * 150n) / 100n);
         expect(nftTx.to).toBeUndefined();
     });
@@ -496,7 +572,7 @@ describe('runFlow on a simulated chain', () => {
         const flow = ammFlow({ proposer: OWNER, delaySeconds: 2 * 86_400, wquai: OTHER });
         const progress = emptyProgress('AMM', 9, OWNER);
         await runFlow(env(chain), flow, progress);
-        expect(progress.steps.every(s => s.status === 'done')).toBe(true);
+        expect(flow.steps.every(s => progress.steps[s.id]?.done)).toBe(true);
         expect(chain.sent).toHaveLength(5);
         expect(progress.ctx.AMM_TIMELOCK).toBeDefined();
         expect(progress.ctx.AMM_FACTORY_IMPL).toBeDefined();
@@ -559,6 +635,50 @@ describe('runFlow on a simulated chain', () => {
         const chain = fakeChain();
         chain.failNext = 'wrongZone';
         await expect(runFlow(env(chain), qrbFlow({ owner: OWNER, royaltyReceiver: OWNER, artworkUri: URI }), emptyProgress('QRB', 9, OWNER))).rejects.toThrow('Cyprus-1');
+    });
+
+    test('code of the right size but the wrong content is refused: a padded imitation does not pass', async () => {
+        const chain = fakeChain();
+        const realRpc = chain.rpc;
+        const imitation = (name: string) => {
+            const code = loadArtifact(name).deployedBytecode;
+            const at = 2 + 2 * 50; // a byte in the executable region
+            const b = (parseInt(code.slice(at, at + 2), 16) ^ 1).toString(16).padStart(2, '0');
+            return code.slice(0, at) + b + code.slice(at + 2); // same length, different code
+        };
+        chain.rpc = async (m, p) => {
+            if (m === 'quai_getCode') {
+                const c = chain.contracts.get(String((p as any[])[0]).toLowerCase());
+                if (c) return imitation(c.name);
+            }
+            return realRpc(m, p);
+        };
+        await expect(runFlow(env(chain), qrbFlow({ owner: OWNER, royaltyReceiver: OWNER, artworkUri: URI }), emptyProgress('QRB', 9, OWNER))).rejects.toThrow('the right length');
+    });
+
+    test('guardians are given the canceller role only, and the flow checks it', async () => {
+        const chain = fakeChain();
+        const guardian = '0x0033333333333333333333333333333333333333';
+        const flow = ammFlow({ proposer: OWNER, delaySeconds: 2 * 86_400, wquai: OTHER, guardians: [guardian] });
+        const progress = emptyProgress('AMM', 9, OWNER);
+        await runFlow(env(chain), flow, progress);
+        const timelock = chain.contracts.get(progress.ctx.AMM_TIMELOCK.toLowerCase())!;
+        expect(timelock.state.hasRole(timelock.state.CANCELLER_ROLE, guardian)).toBe(true);
+        expect(timelock.state.hasRole(timelock.state.PROPOSER_ROLE, guardian)).toBe(false);
+        expect(() => ammFlow({ proposer: OWNER, delaySeconds: 2 * 86_400, wquai: OTHER, guardians: [OWNER] })).toThrow('different account from the proposer');
+    });
+
+    test('the factory proxy creation is floored by the pool code its initialize creates, not just by the simulator', async () => {
+        const chain = fakeChain();
+        const flow = ammFlow({ proposer: OWNER, delaySeconds: 2 * 86_400, wquai: OTHER });
+        await runFlow(env(chain), flow, emptyProgress('AMM', 9, OWNER));
+        const proxyTx = chain.sent[2]; // timelock, factoryImpl, factoryProxy
+        const nested = CIRCLESWAP_ARTIFACTS.ERC1967Proxy.runtimeBytes + CIRCLESWAP_ARTIFACTS.CircleswapPair.runtimeBytes + CIRCLESWAP_ARTIFACTS.UpgradeableBeacon.runtimeBytes;
+        const floor = 2n * (53_000n + 200n * BigInt(nested) + 16n * BigInt((proxyTx.data.length - 2) / 2)) + 500_000n;
+        expect(BigInt(proxyTx.gas)).toBeGreaterThanOrEqual(floor);
+        // the plain contracts keep the simulator-based limit when it is the larger
+        expect(creationGasLimit(10_000_000n, 1000, 1000)).toBe(30_000_000n);
+        expect(creationGasLimit(1n, 11_613, 400)).toBeGreaterThan(4_000_000n);
     });
 
     test('code of the wrong size is refused', async () => {

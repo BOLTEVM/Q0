@@ -6,8 +6,9 @@ import { ZeroAddress } from 'quais';
 import { TOKEN_REGISTRY } from '../registries/tokens';
 import { QRB_BOOST_BPS, QRB_BOOST_THRESHOLD_WEI, QRB_BOOST_MATURITY_SECONDS } from '../registries/qrb';
 import { CIRCLESWAP_ARTIFACTS, type CircleswapArtifactName } from '../generated/circleswapArtifacts';
-import { checksum, interfaceOf, isCyprus1QuaiAddress } from './chain';
+import { assertCyprus1, checksum, interfaceOf, isCyprus1QuaiAddress } from './chain';
 import { EIP1967_IMPLEMENTATION_SLOT, EIP1967_ADMIN_SLOT } from '../eip1967';
+import { matchCode } from './code';
 
 /** Read-only chain access. The browser supplies raw JSON-RPC; tests supply a fake. */
 export interface Reader {
@@ -32,6 +33,12 @@ export interface DeployStep {
     targetKey?: string;
     /** create only: where the new address is stored in the context. */
     resultKey?: string;
+    /**
+     * create only: runtime code, in bytes, that the transaction deposits BEYOND the contract itself, because its
+     * constructor or initialize call creates further contracts (a factory proxy creates the pool implementation and the
+     * beacon). It sets the floor of the gas limit; see gas.ts.
+     */
+    nestedBytes?: number;
     /** Cost hint shown before anything is signed. */
     note?: string;
     /** Reads the chain and throws if the step did not leave things as intended. Runs after the step, every time. */
@@ -85,13 +92,15 @@ function expectEqual(what: string, got: unknown, want: unknown) {
     if (!eq) throw new Error(`Post-deploy check failed: ${what} is ${String(got)}, expected ${String(want)}`);
 }
 
-/** The runtime code at `address` must be the size the compiler produced (immutables are zero-filled, same length). */
-export async function verifyCodeSize(reader: Reader, name: CircleswapArtifactName, address: string): Promise<void> {
-    const code = await reader.getCode(address);
-    if (!code || code === '0x') throw new Error(`${name} at ${address} has no code on chain.`);
-    const got = (code.length - 2) / 2;
-    const want = CIRCLESWAP_ARTIFACTS[name].runtimeBytes;
-    if (got !== want) throw new Error(`${name} at ${address} is ${got} bytes of code; the compiled contract is ${want}.`);
+/**
+ * The runtime code at `address` must be exactly the compiled contract: same length, and the same code once the
+ * compiler's immutables are zeroed and its metadata trailer dropped (a padded imitation passes a length check).
+ */
+export async function verifyCode(reader: Reader, name: CircleswapArtifactName, address: string): Promise<void> {
+    const m = await matchCode(reader, name, address);
+    if (m.state === 'missing') throw new Error(`${name} at ${address} has no code on chain.`);
+    if (m.state === 'wrong-size') throw new Error(`${name} at ${address} is ${m.size} bytes of code; the compiled contract is ${m.wantSize}.`);
+    if (m.state === 'wrong-code') throw new Error(`${name} at ${address} has the right length (${m.size} bytes) but its code is not the compiled ${name}.`);
 }
 
 
@@ -101,14 +110,14 @@ export async function verifyProxy(
     proxyAddress: string,
     expectedImplAddress: string
 ): Promise<void> {
-    await verifyCodeSize(reader, 'ERC1967Proxy', proxyAddress);
+    await verifyCode(reader, 'ERC1967Proxy', proxyAddress);
     const raw = await reader.getStorageAt(proxyAddress, EIP1967_IMPLEMENTATION_SLOT);
     if (!raw || raw === '0x' || raw === '0x' + '00'.repeat(32)) {
         throw new Error(`ERC1967Proxy at ${proxyAddress} has empty implementation slot.`);
     }
     const onChainImpl = checksum('0x' + raw.slice(-40));
     expectEqual('EIP-1967 Implementation Slot', onChainImpl, expectedImplAddress);
-    await verifyCodeSize(reader, implName, expectedImplAddress);
+    await verifyCode(reader, implName, expectedImplAddress);
     // UUPS keeps its upgrade authority in the implementation (the owner), not in a proxy admin: that slot must be empty.
     const admin = await reader.getStorageAt(proxyAddress, EIP1967_ADMIN_SLOT);
     if (admin && /[1-9a-f]/i.test(admin.replace(/^0x/, ''))) {
@@ -149,7 +158,7 @@ export function qrbFlow(input: QrbFlowConfig): Flow {
             resultKey: 'QRB',
             args: () => [owner, uri],
             verify: async (ctx, r) => {
-                await verifyCodeSize(r, 'Qrb', ctx.QRB);
+                await verifyCode(r, 'Qrb', ctx.QRB);
                 expectEqual('Qrb.name', await read(r, 'Qrb', ctx.QRB, 'name'), 'Circleswap Qrb');
                 expectEqual('Qrb.symbol', await read(r, 'Qrb', ctx.QRB, 'symbol'), 'QRB');
                 expectEqual('Qrb.owner', await read(r, 'Qrb', ctx.QRB, 'owner'), owner);
@@ -172,7 +181,7 @@ export function qrbFlow(input: QrbFlowConfig): Flow {
         args: ctx => [owner, royaltyReceiver, uri, input.existingQrb ?? ctx.QRB],
         verify: async (ctx, r) => {
             const qrb = input.existingQrb ?? ctx.QRB;
-            await verifyCodeSize(r, 'QrbArtifactNFT', ctx.QRB_NFT);
+            await verifyCode(r, 'QrbArtifactNFT', ctx.QRB_NFT);
             expectEqual('NFT.qrb', await read(r, 'QrbArtifactNFT', ctx.QRB_NFT, 'qrb'), qrb);
             expectEqual('NFT.owner', await read(r, 'QrbArtifactNFT', ctx.QRB_NFT, 'owner'), owner);
             expectEqual('NFT.artworkURI', await read(r, 'QrbArtifactNFT', ctx.QRB_NFT, 'artworkURI'), uri);
@@ -232,6 +241,16 @@ export interface AmmFlowConfig {
     wquai: string;
     /** Let anyone run an operation once its delay has passed (recommended). If false only the proposer can. */
     openExecution?: boolean;
+    /**
+     * Optional accounts that may CANCEL a queued operation but not queue or run one: a second key that can veto a
+     * proposal made by a compromised proposer. Keep each on a different key from the proposer.
+     */
+    guardians?: string[];
+    /**
+     * Two real tokens with no pool at this factory yet. When given, the last step proves, with a static call that creates
+     * nothing, that a pool made by the new factory lands at an address `checkPoolAddress` accepts (default: Cyprus-1).
+     */
+    probe?: { tokens: [string, string]; checkPoolAddress?: (address: string) => void };
 }
 
 export const TIMELOCK_MIN_DELAY = 86_400;
@@ -248,6 +267,35 @@ async function expectReverts(reader: Reader, to: string, data: string, what: str
     throw new Error(`Post-deploy check failed: ${what} did not revert, so it is not locked.`);
 }
 
+/**
+ * Proves the factory can make a pool somewhere acceptable, without making one: a static call to createPair returns the
+ * address the pool WOULD get. Quai grinds contract addresses into the creator's zone, so this is the check that pools
+ * land where the app can reach them. Skipped when the pair already exists (a resumed run, or an earlier probe's twin).
+ */
+export async function probePoolPlacement(
+    reader: Reader,
+    factory: string,
+    tokens: [string, string],
+    check: (address: string) => void = assertCyprus1
+): Promise<string | null> {
+    const existing: string = await read(reader, 'CircleswapFactory', factory, 'getPair', tokens);
+    if (!same(existing, ZeroAddress)) return null;
+    let out: string;
+    try {
+        out = await reader.call(factory, interfaceOf('CircleswapFactory').encodeFunctionData('createPair', tokens));
+    } catch (e: any) {
+        throw new Error(`Post-deploy check failed: the factory could not simulate creating a pool (${e?.message ?? e}).`);
+    }
+    const pool = checksum(interfaceOf('CircleswapFactory').decodeFunctionResult('createPair', out)[0] as string);
+    if (same(pool, ZeroAddress)) throw new Error('Post-deploy check failed: the factory returned the zero address for a new pool.');
+    try {
+        check(pool);
+    } catch (e: any) {
+        throw new Error(`Post-deploy check failed: a pool made by this factory would land at ${pool}. ${e?.message ?? e}`);
+    }
+    return pool;
+}
+
 export function ammFlow(input: AmmFlowConfig): Flow {
     const proposer = requireAddress('Proposer', input.proposer);
     const wquai = requireAddress('WQUAI', input.wquai);
@@ -256,6 +304,13 @@ export function ammFlow(input: AmmFlowConfig): Flow {
         throw new Error('The timelock delay must be between 1 day and 30 days.');
     }
     const open = input.openExecution !== false;
+    const guardians = (input.guardians ?? []).map((g, i) => requireAddress(`Guardian ${i + 1}`, g));
+    if (new Set(guardians.map(g => g.toLowerCase())).size !== guardians.length) throw new Error('A guardian is listed twice.');
+    if (guardians.some(g => same(g, proposer))) throw new Error('A guardian must be a different account from the proposer: the point is a second key.');
+    const probe = input.probe && {
+        tokens: [requireAddress('Probe token 1', input.probe.tokens[0]), requireAddress('Probe token 2', input.probe.tokens[1])] as [string, string],
+        check: input.probe.checkPoolAddress ?? assertCyprus1
+    };
 
     const steps: DeployStep[] = [
         {
@@ -264,10 +319,10 @@ export function ammFlow(input: AmmFlowConfig): Flow {
             kind: 'create',
             contract: 'CircleswapTimelock',
             resultKey: 'AMM_TIMELOCK',
-            args: () => [delay, [proposer], [open ? ZeroAddress : proposer]],
+            args: () => [delay, [proposer], [open ? ZeroAddress : proposer], guardians],
             verify: async (ctx, r) => {
                 const t = ctx.AMM_TIMELOCK;
-                await verifyCodeSize(r, 'CircleswapTimelock', t);
+                await verifyCode(r, 'CircleswapTimelock', t);
                 expectEqual('Timelock.getMinDelay', await read(r, 'CircleswapTimelock', t, 'getMinDelay'), BigInt(delay));
                 const PROPOSER = await read(r, 'CircleswapTimelock', t, 'PROPOSER_ROLE');
                 const CANCELLER = await read(r, 'CircleswapTimelock', t, 'CANCELLER_ROLE');
@@ -279,6 +334,12 @@ export function ammFlow(input: AmmFlowConfig): Flow {
                 // Only the timelock itself administers its roles, so changing who may propose is itself delayed.
                 expectEqual('Timelock admin is itself', await read(r, 'CircleswapTimelock', t, 'hasRole', [ADMIN, t]), true);
                 expectEqual('Proposer is not the admin', await read(r, 'CircleswapTimelock', t, 'hasRole', [ADMIN, proposer]), false);
+                // A guardian can veto, and nothing else.
+                for (const g of guardians) {
+                    expectEqual(`Guardian ${g} can cancel`, await read(r, 'CircleswapTimelock', t, 'hasRole', [CANCELLER, g]), true);
+                    expectEqual(`Guardian ${g} cannot propose`, await read(r, 'CircleswapTimelock', t, 'hasRole', [PROPOSER, g]), false);
+                    expectEqual(`Guardian ${g} is not the admin`, await read(r, 'CircleswapTimelock', t, 'hasRole', [ADMIN, g]), false);
+                }
             }
         },
         {
@@ -289,7 +350,7 @@ export function ammFlow(input: AmmFlowConfig): Flow {
             resultKey: 'AMM_FACTORY_IMPL',
             args: () => [],
             verify: async (ctx, r) => {
-                await verifyCodeSize(r, 'CircleswapFactory', ctx.AMM_FACTORY_IMPL);
+                await verifyCode(r, 'CircleswapFactory', ctx.AMM_FACTORY_IMPL);
                 await expectReverts(r, ctx.AMM_FACTORY_IMPL, interfaceOf('CircleswapFactory').encodeFunctionData('initialize', [proposer]), 'Factory implementation initialize()');
             }
         },
@@ -299,19 +360,23 @@ export function ammFlow(input: AmmFlowConfig): Flow {
             kind: 'create',
             contract: 'ERC1967Proxy',
             resultKey: 'AMM_FACTORY',
+            // initialize() creates the pool implementation and the pool beacon inside this transaction.
+            nestedBytes: CIRCLESWAP_ARTIFACTS.CircleswapPair.runtimeBytes + CIRCLESWAP_ARTIFACTS.UpgradeableBeacon.runtimeBytes,
             // Initialised in the same transaction as creation: there is no window in which anyone else could call initialize.
-            args: ctx => [ctx.AMM_FACTORY_IMPL, interfaceOf('CircleswapFactory').encodeFunctionData('initialize', [ctx.AMM_TIMELOCK])],
+            args: ctx => (!ctx.AMM_FACTORY_IMPL || !ctx.AMM_TIMELOCK
+                ? [undefined]
+                : [ctx.AMM_FACTORY_IMPL, interfaceOf('CircleswapFactory').encodeFunctionData('initialize', [ctx.AMM_TIMELOCK])]),
             verify: async (ctx, r) => {
                 const f = ctx.AMM_FACTORY;
                 await verifyProxy(r, 'CircleswapFactory', f, ctx.AMM_FACTORY_IMPL);
                 expectEqual('Factory.owner is the timelock', await read(r, 'CircleswapFactory', f, 'owner'), ctx.AMM_TIMELOCK);
                 const beacon: string = await read(r, 'CircleswapFactory', f, 'pairBeacon');
                 ctx.AMM_PAIR_BEACON = beacon;
-                await verifyCodeSize(r, 'UpgradeableBeacon', beacon);
+                await verifyCode(r, 'UpgradeableBeacon', beacon);
                 // The pool beacon belongs to the factory, not to a person, and is not frozen yet.
                 expectEqual('Pool beacon owner is the factory', await read(r, 'UpgradeableBeacon', beacon, 'owner'), f);
                 const pairImpl: string = await read(r, 'UpgradeableBeacon', beacon, 'implementation');
-                await verifyCodeSize(r, 'CircleswapPair', pairImpl);
+                await verifyCode(r, 'CircleswapPair', pairImpl);
                 expectEqual('Pool implementation is locked (factory = 0x...01)', await read(r, 'CircleswapPair', pairImpl, 'factory'), ONE);
                 expectEqual('Factory.pairUpgradesFrozen', await read(r, 'CircleswapFactory', f, 'pairUpgradesFrozen'), false);
             }
@@ -324,7 +389,7 @@ export function ammFlow(input: AmmFlowConfig): Flow {
             resultKey: 'AMM_ROUTER_IMPL',
             args: () => [],
             verify: async (ctx, r) => {
-                await verifyCodeSize(r, 'CircleswapRouter', ctx.AMM_ROUTER_IMPL);
+                await verifyCode(r, 'CircleswapRouter', ctx.AMM_ROUTER_IMPL);
                 await expectReverts(r, ctx.AMM_ROUTER_IMPL, interfaceOf('CircleswapRouter').encodeFunctionData('initialize', [ctx.AMM_FACTORY, wquai, proposer]), 'Router implementation initialize()');
             }
         },
@@ -334,12 +399,15 @@ export function ammFlow(input: AmmFlowConfig): Flow {
             kind: 'create',
             contract: 'ERC1967Proxy',
             resultKey: 'AMM_ROUTER',
-            args: ctx => [ctx.AMM_ROUTER_IMPL, interfaceOf('CircleswapRouter').encodeFunctionData('initialize', [ctx.AMM_FACTORY, wquai, ctx.AMM_TIMELOCK])],
+            args: ctx => (!ctx.AMM_ROUTER_IMPL || !ctx.AMM_FACTORY || !ctx.AMM_TIMELOCK
+                ? [undefined]
+                : [ctx.AMM_ROUTER_IMPL, interfaceOf('CircleswapRouter').encodeFunctionData('initialize', [ctx.AMM_FACTORY, wquai, ctx.AMM_TIMELOCK])]),
             verify: async (ctx, r) => {
                 await verifyProxy(r, 'CircleswapRouter', ctx.AMM_ROUTER, ctx.AMM_ROUTER_IMPL);
                 expectEqual('Router.owner is the timelock', await read(r, 'CircleswapRouter', ctx.AMM_ROUTER, 'owner'), ctx.AMM_TIMELOCK);
                 expectEqual('Router.factory', await read(r, 'CircleswapRouter', ctx.AMM_ROUTER, 'factory'), ctx.AMM_FACTORY);
                 expectEqual('Router.WETH', await read(r, 'CircleswapRouter', ctx.AMM_ROUTER, 'WETH'), wquai);
+                if (probe) await probePoolPlacement(r, ctx.AMM_FACTORY, probe.tokens, probe.check);
             }
         }
     ];
@@ -397,7 +465,7 @@ export function farmFlow(input: FarmFlowConfig): Flow {
             resultKey: 'MASTERCHEF',
             args: () => [owner, rewardA, rewardB, qrb, input.rewardAPerSecond, input.rewardBPerSecond],
             verify: async (ctx, r) => {
-                await verifyCodeSize(r, 'CircleswapMasterChef', ctx.MASTERCHEF);
+                await verifyCode(r, 'CircleswapMasterChef', ctx.MASTERCHEF);
                 const f = ctx.MASTERCHEF;
                 expectEqual('Farm.owner', await read(r, 'CircleswapMasterChef', f, 'owner'), owner);
                 expectEqual('Farm.qrb', await read(r, 'CircleswapMasterChef', f, 'qrb'), qrb);

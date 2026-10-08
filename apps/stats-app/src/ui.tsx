@@ -121,9 +121,9 @@ export function Notice({ tone, children }: { tone: 'info' | 'warn' | 'danger' | 
   );
 }
 
-const SEVERITY_COLOR = { info: 'var(--accent-neon)', warn: 'var(--warning)', danger: 'var(--error)' } as const;
+const SEVERITY_COLOR = { info: 'var(--accent-neon)', ok: 'var(--success)', warn: 'var(--warning)', danger: 'var(--error)' } as const;
 
-export function Badge({ severity = 'info', children, title }: { severity?: 'info' | 'warn' | 'danger' | 'neutral'; children: ReactNode; title?: string }) {
+export function Badge({ severity = 'info', children, title }: { severity?: 'info' | 'ok' | 'warn' | 'danger' | 'neutral'; children: ReactNode; title?: string }) {
   const color = severity === 'neutral' ? 'var(--text-muted)' : SEVERITY_COLOR[severity];
   return (
     <span

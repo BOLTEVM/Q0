@@ -6,6 +6,8 @@ import {
   quoteStep,
   projectCreationGas,
   creationBytes,
+  depositedBytes,
+  creationGasLimit,
   emptyProgress,
   loadProgress,
   clearProgress,
@@ -20,7 +22,7 @@ import {
   type DeployStep,
   type RunnerEnv
 } from 'quai-service/deploy';
-import { saveLocalDeployments } from 'quai-service/bootstrap';
+import { saveLocalDeployments, readLocalDeployments } from 'quai-service/bootstrap';
 import { getQuaiProvider } from './providerUtils';
 import { Notice, Spinner, AddrLink, CopyButton, box, muted, smallBtn } from './ui';
 
@@ -131,7 +133,7 @@ export default function FlowRunner({ flowId, flow, configError, fingerprint, ini
         } catch (err: any) {
           if (step.kind === 'create' && reference && /has not produced/.test(String(err?.message))) {
             const est = projectCreationGas(reference.estimate, reference.bytes, creationBytes(step));
-            out[step.id] = { projectedLimit: (est * 300n) / 100n, note: 'Projected from the size of the contract; simulated exactly when reached.' };
+            out[step.id] = { projectedLimit: creationGasLimit(est, depositedBytes(step), creationBytes(step)), note: 'Projected from the size of the contract; simulated exactly when reached.' };
           } else {
             out[step.id] = { note: String(err?.message ?? err) };
           }
@@ -181,7 +183,8 @@ export default function FlowRunner({ flowId, flow, configError, fingerprint, ini
           })
       });
       if (flow.steps.every(s => p.steps[s.id]?.done)) {
-        const dep = deployedFromProgress(DEPLOYED, [p], artworkUri);
+        const base = { ...DEPLOYED, ...(readLocalDeployments()?.values ?? {}) };
+        const dep = deployedFromProgress(base, [p], artworkUri);
         if (dep) {
           saveLocalDeployments(dep);
           setSavedLocal(true);
@@ -214,7 +217,9 @@ export default function FlowRunner({ flowId, flow, configError, fingerprint, ini
   const finished = Boolean(flow && shown && flow.steps.every(s => shown.steps[s.id]?.done));
   const pending = shown ? pendingSteps(shown) : [];
 
-  const deployedValues = shown ? deployedFromProgress(DEPLOYED, [shown], artworkUri) : null;
+  const deployedValues = shown
+    ? deployedFromProgress({ ...DEPLOYED, ...(readLocalDeployments()?.values ?? {}) }, [shown], artworkUri)
+    : null;
   const deployedTs = useMemo(() => {
     try {
       return deployedValues ? renderDeployedTs(deployedValues) : null;
@@ -302,7 +307,7 @@ export default function FlowRunner({ flowId, flow, configError, fingerprint, ini
         <div style={{ ...box, marginBottom: '0.9rem', fontSize: '0.82rem' }}>
           Worst-case gas for the steps left: <strong>{quai(budget)}</strong>
           {balance !== null && <> · wallet holds <strong>{quai(balance)}</strong></>}
-          {balance !== null && balance < budget && <div style={{ color: 'var(--error)', marginTop: 2 }}>The wallet may not cover this. On Quai a reverted transaction costs its whole limit, and creations cost about 2.5× the simulator&apos;s estimate, so the limits are set wide on purpose; unused gas is refunded on success.</div>}
+          {balance !== null && balance < budget && <div style={{ color: 'var(--warning)', marginTop: 2 }}>The wallet holds less than the worst case. That figure is every step&apos;s whole gas limit added up; what a step does not use is refunded, and what a creation really uses has varied from about 0.4× to 2.5× the simulator&apos;s estimate on Quai, so the limits are set wide on purpose (a transaction that runs out of gas or reverts uses its whole limit). Each step checks its own funds before it asks you to sign, and a stopped run resumes where it stopped, so you can top up part-way.</div>}
         </div>
       )}
 

@@ -10,6 +10,7 @@
 
 import { CIRCLESWAP_ARTIFACTS } from '../generated/circleswapArtifacts';
 import { assertCyprus1, checksum, creationData, grindCreationData, interfaceOf } from './chain';
+import { creationGasLimit } from './gas';
 import type { DeployStep, Flow, FlowContext, Reader } from './flows';
 import { emptyProgress, saveProgress, type FlowProgress, type KeyValueStore } from './progress';
 
@@ -111,7 +112,7 @@ export async function quoteStep(env: RunnerEnv, step: DeployStep, ctx: FlowConte
         } catch (e: any) {
             throw new StepError(`${step.label}: simulation failed, nothing was sent. ${e?.message ?? e}`);
         }
-        const gasLimit = (estimate * BigInt(Math.round((env.creationGasMultiplier ?? 3) * 100))) / 100n;
+        const gasLimit = creationGasLimit(estimate, depositedBytes(step), (ground.data.length - 2) / 2, env.creationGasMultiplier);
         const gasPrice = await gasPriceOf(env.rpc);
         return {
             stepId: step.id,
@@ -169,6 +170,11 @@ export function projectCreationGas(quotedEstimate: bigint, quotedBytes: number, 
 
 export function creationBytes(step: DeployStep): number {
     return (CIRCLESWAP_ARTIFACTS[step.contract].bytecode.length - 2) / 2;
+}
+
+/** Runtime code a creation step leaves on chain: the contract, plus whatever its constructor or initialize creates. */
+export function depositedBytes(step: DeployStep): number {
+    return CIRCLESWAP_ARTIFACTS[step.contract].runtimeBytes + (step.nestedBytes ?? 0);
 }
 
 export interface StepResult {

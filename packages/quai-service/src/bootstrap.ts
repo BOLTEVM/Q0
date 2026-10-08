@@ -7,6 +7,7 @@
 // Deliberately imports nothing heavy (no `quais`, no bytecode): it must run before, and instead of, the rest of
 // the package. A value already set in the generated deployed.ts always wins and is never overridden.
 
+import { getAddress } from 'quais';
 import { DEPLOYED, type DeployedAddresses } from './registries/deployed';
 import { CIRCLESWAP_RUNTIME_BYTES } from './generated/circleswapRuntimeSizes';
 import { EIP1967_IMPLEMENTATION_SLOT } from './eip1967';
@@ -63,7 +64,7 @@ export function saveLocalDeployments(values: Partial<DeployedAddresses>, storage
     const clean: Partial<DeployedAddresses> = {};
     for (const key of ADDRESS_KEYS) {
         const v = values[key];
-        if (v && ADDRESS.test(v)) clean[key] = v;
+        if (v && ADDRESS.test(v)) clean[key] = getAddress(v);
     }
     if (values.ARTWORK_URI && ARWEAVE.test(values.ARTWORK_URI)) clean.ARTWORK_URI = values.ARTWORK_URI;
     const existing = readLocalDeployments(storage)?.values ?? {};
@@ -114,14 +115,15 @@ export async function applyVerifiedLocalDeployments(
     const accepted: Partial<Record<AddressKey, string>> = {};
     await Promise.all(
         ADDRESS_KEYS.map(async key => {
-            const address = stored.values[key];
-            if (!address) return;
+            const rawAddress = stored.values[key];
+            if (!rawAddress) return;
             if (DEPLOYED[key] !== null) {
                 report.shadowed.push(key);
                 return;
             }
             try {
-                if (!ADDRESS.test(address)) throw new Error('not a Cyprus-1 address');
+                if (!ADDRESS.test(rawAddress)) throw new Error('not a Cyprus-1 address');
+                const address = getAddress(rawAddress);
                 if (key === 'AMM_FACTORY' || key === 'AMM_ROUTER') {
                     const code: string = await rpc(fetcher, rpcUrl, 'quai_getCode', [address, 'latest']);
                     const size = code && code !== '0x' ? (code.length - 2) / 2 : 0;
@@ -133,7 +135,7 @@ export async function applyVerifiedLocalDeployments(
                     if (!rawImpl || rawImpl === '0x' || rawImpl === '0x' + '00'.repeat(32)) {
                         throw new Error('EIP-1967 implementation slot is empty');
                     }
-                    const implAddress = ('0x' + rawImpl.slice(-40)).toLowerCase();
+                    const implAddress = getAddress('0x' + rawImpl.slice(-40));
                     if (!ADDRESS.test(implAddress)) throw new Error('implementation is not a Cyprus-1 address');
 
                     const implCode: string = await rpc(fetcher, rpcUrl, 'quai_getCode', [implAddress, 'latest']);
@@ -161,8 +163,10 @@ export async function applyVerifiedLocalDeployments(
         const factory = accepted.AMM_FACTORY ?? DEPLOYED.AMM_FACTORY;
         try {
             if (!factory) throw new Error('no factory to pair with');
-            const out: string = await rpc(fetcher, rpcUrl, 'quai_call', [{ to: accepted.AMM_ROUTER, data: '0xc45a0155' }, 'latest']); // factory()
-            if (typeof out !== 'string' || ('0x' + out.slice(-40)).toLowerCase() !== factory.toLowerCase()) throw new Error('router was built for a different factory');
+            const routerAddr = getAddress(accepted.AMM_ROUTER);
+            const factoryAddr = getAddress(factory);
+            const out: string = await rpc(fetcher, rpcUrl, 'quai_call', [{ to: routerAddr, data: '0xc45a0155' }, 'latest']); // factory()
+            if (typeof out !== 'string' || getAddress('0x' + out.slice(-40)) !== factoryAddr) throw new Error('router was built for a different factory');
         } catch (e: any) {
             report.rejected.push({ key: 'AMM_ROUTER', reason: e?.message ?? 'check failed' });
             delete accepted.AMM_ROUTER;
@@ -181,10 +185,15 @@ export async function applyVerifiedLocalDeployments(
     }
 
     // Drop whatever failed so a stale pointer cannot come back on the next load.
+    // Transient network or RPC errors must not prune otherwise valid saved deployments.
     if (report.rejected.length && storage) {
-        const keep = { ...stored.values };
-        for (const r of report.rejected) delete (keep as Record<string, unknown>)[r.key];
-        storage.setItem(LOCAL_DEPLOYMENTS_KEY, JSON.stringify({ ...stored, values: keep }));
+        const isNetworkErr = (reason: string) => /RPC unavailable|timeout|Failed to fetch|NetworkError|fetch failed/i.test(reason);
+        const trulyInvalid = report.rejected.filter(r => !isNetworkErr(r.reason));
+        if (trulyInvalid.length > 0) {
+            const keep = { ...stored.values };
+            for (const r of trulyInvalid) delete (keep as Record<string, unknown>)[r.key];
+            storage.setItem(LOCAL_DEPLOYMENTS_KEY, JSON.stringify({ ...stored, values: keep }));
+        }
     }
     return report;
 }

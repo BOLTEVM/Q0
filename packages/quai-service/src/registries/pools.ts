@@ -49,8 +49,8 @@ export const DEXES: { QUAISWAP: LiveDex; QUAINANCE: LiveDex; CIRCLESWAP: DexInfo
     CIRCLESWAP: {
         id: 'CIRCLESWAP',
         label: 'Circleswap',
-        factory: DEPLOYED.AMM_FACTORY,
-        router: DEPLOYED.AMM_ROUTER
+        get factory() { return DEPLOYED.AMM_FACTORY; },
+        get router() { return DEPLOYED.AMM_ROUTER; }
     }
 };
 
@@ -99,6 +99,136 @@ export interface SwapRoute {
     optional?: boolean;
     /** Token symbols, first to last. Each adjacent pair must be a pool on `dex`. */
     path: string[];
+}
+
+/** One router-owned portion of a cross-DEX navigation path. */
+export interface RouteSegment {
+    dex: DexId;
+    /** Token symbols, first to last. Every adjacent pair is a pool on `dex`. */
+    path: string[];
+}
+
+/**
+ * A route that crosses DEX boundaries at a shared token. Each segment is settled by its own router, so these
+ * swaps require more than one wallet transaction and are deliberately not presented as atomic.
+ */
+export interface CrossDexRoute {
+    id: string;
+    label: string;
+    path: string[];
+    segments: RouteSegment[];
+    crossDex: true;
+}
+
+export type NavigationRoute = SwapRoute | CrossDexRoute;
+
+const NAVIGATION_TOKEN_PRIORITY = ['QRB', 'Q0', 'BDELTA', 'WQUAI'];
+
+function tokenPriority(symbol: string): [number, string] {
+    const index = NAVIGATION_TOKEN_PRIORITY.indexOf(symbol);
+    return [index < 0 ? NAVIGATION_TOKEN_PRIORITY.length : index, symbol];
+}
+
+function compareTokens(a: string, b: string): number {
+    const [aRank, aName] = tokenPriority(a);
+    const [bRank, bName] = tokenPriority(b);
+    return aRank - bRank || aName.localeCompare(bName);
+}
+
+function comparePaths(a: string[], b: string[]): number {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+        const cmp = compareTokens(a[i], b[i]);
+        if (cmp) return cmp;
+    }
+    return a.length - b.length;
+}
+
+function routeScore(route: { path: string[]; segments: RouteSegment[] }): string {
+    // Prefer the shortest bridge, then the fewest router changes. The token priority keeps the QRB -> Q0 ->
+    // BDELTA -> WQUAI path stable and readable when more pools are added later.
+    return [route.path.length, route.segments.length, ...route.path.map(t => tokenPriority(t)[0])].join(':');
+}
+
+function betterCrossRoute(a: CrossDexRoute, b: CrossDexRoute): CrossDexRoute {
+    const scoreA = routeScore(a).split(':').map(Number);
+    const scoreB = routeScore(b).split(':').map(Number);
+    for (let i = 0; i < Math.max(scoreA.length, scoreB.length); i++) {
+        const cmp = (scoreA[i] ?? 0) - (scoreB[i] ?? 0);
+        if (cmp) return cmp < 0 ? a : b;
+    }
+    return comparePaths(a.path, b.path) <= 0 ? a : b;
+}
+
+function groupSegments(edges: { from: string; to: string; dex: DexId }[]): RouteSegment[] {
+    const segments: RouteSegment[] = [];
+    for (const edge of edges) {
+        const current = segments[segments.length - 1];
+        if (current?.dex === edge.dex) current.path.push(edge.to);
+        else segments.push({ dex: edge.dex, path: [edge.from, edge.to] });
+    }
+    return segments;
+}
+
+/**
+ * Build the best simple paths that cross between live DEXes at a shared token. A path is intentionally capped at
+ * four pools: that covers the QRB -> Q0 -> BDELTA -> WQUAI bridge without turning the selector into an unbounded
+ * graph search. The swap screen can reverse a route, so each endpoint pair is emitted once.
+ */
+export function buildCrossDexRoutes(pools: PoolInfo[], maxHops: number = 4): CrossDexRoute[] {
+    const graph = new Map<string, { to: string; dex: DexId }[]>();
+    const add = (from: string, to: string, dex: DexId) => {
+        const edges = graph.get(from) ?? [];
+        edges.push({ to, dex });
+        graph.set(from, edges);
+    };
+
+    for (const pool of pools) {
+        const [a, b] = pool.tokens;
+        if (a === b) continue;
+        add(a, b, pool.dex);
+        add(b, a, pool.dex);
+    }
+
+    const candidates: CrossDexRoute[] = [];
+    const symbols = [...graph.keys()].sort(compareTokens);
+    for (const start of symbols) {
+        const walk = (current: string, path: string[], edges: { from: string; to: string; dex: DexId }[]) => {
+            if (edges.length >= 2 && new Set(edges.map(e => e.dex)).size > 1) {
+                const orientedPath = compareTokens(path[0], path[path.length - 1]) <= 0 ? path : [...path].reverse();
+                const orientedEdges = orientedPath[0] === path[0]
+                    ? edges
+                    : [...edges].reverse().map(e => ({ from: e.to, to: e.from, dex: e.dex }));
+                const segments = groupSegments(orientedEdges);
+                candidates.push({
+                    id: `CROSS_${orientedPath.join('_')}_${segments.map(s => s.dex).join('_')}`,
+                    label: `${orientedPath.join(' → ')} · ${segments.map(s => DEXES[s.dex].label).join(' → ')}`,
+                    path: orientedPath,
+                    segments,
+                    crossDex: true
+                });
+            }
+            if (edges.length >= maxHops) return;
+            for (const edge of graph.get(current) ?? []) {
+                if (path.includes(edge.to)) continue;
+                walk(edge.to, [...path, edge.to], [...edges, { from: current, to: edge.to, dex: edge.dex }]);
+            }
+        };
+        walk(start, [start], []);
+    }
+
+    const best = new Map<string, CrossDexRoute>();
+    for (const candidate of candidates) {
+        const endpoints = [candidate.path[0], candidate.path[candidate.path.length - 1]].sort(compareTokens).join('/');
+        const previous = best.get(endpoints);
+        if (!previous || betterCrossRoute(candidate, previous) === candidate) best.set(endpoints, candidate);
+    }
+    return [...best.values()].sort((a, b) => comparePaths(a.path, b.path));
+}
+
+/** Orient a cross-DEX plan in the direction selected by the swap form. */
+export function orientedSegments(route: CrossDexRoute, reversed: boolean): RouteSegment[] {
+    if (!reversed) return route.segments.map(s => ({ dex: s.dex, path: [...s.path] }));
+    return [...route.segments].reverse().map(s => ({ dex: s.dex, path: [...s.path].reverse() }));
 }
 
 export const SWAP_ROUTES: SwapRoute[] = [

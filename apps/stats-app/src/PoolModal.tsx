@@ -16,7 +16,9 @@ import {
   getLpTotalSupply,
   encodeApprove,
   encodeAddLiquidity,
+  encodeAddLiquidityETH,
   encodeRemoveLiquidity,
+  encodeRemoveLiquidityETH,
   estimateLpMint,
   lpUnderlying,
   removeLiquidityMins,
@@ -29,15 +31,16 @@ import {
 } from 'quai-service';
 import { sendWalletTransaction, getQuaiProvider } from './providerUtils';
 
-const POOL_TOKENS = Object.values(TOKEN_REGISTRY).filter(t => !t.isNative && t.deployed !== false);
-
 // Circleswap first: it is our own AMM, so these are the pools we can create and own the whole path of.
 const PRESETS: { label: string; dex: DexId; a: string; b: string }[] = [
+  { label: 'QRB / Q0 · Circleswap', dex: 'CIRCLESWAP', a: 'QRB', b: 'Q0' },
+  { label: 'QRB / QUAI · Circleswap', dex: 'CIRCLESWAP', a: 'QRB', b: 'QUAI' },
   { label: 'BDELTA / Q0 · Circleswap', dex: 'CIRCLESWAP', a: 'BDELTA', b: 'Q0' },
   { label: 'BDELTA / WQUAI · Circleswap', dex: 'CIRCLESWAP', a: 'BDELTA', b: 'WQUAI' },
   { label: 'BDELTA / Q0 · Quaiswap', dex: 'QUAISWAP', a: 'BDELTA', b: 'Q0' },
   { label: 'BDELTA / Q0 · Quainance', dex: 'QUAINANCE', a: 'BDELTA', b: 'Q0' },
-  { label: 'BDELTA / WQUAI · Quaiswap', dex: 'QUAISWAP', a: 'BDELTA', b: 'WQUAI' }
+  { label: 'BDELTA / WQUAI · Quaiswap', dex: 'QUAISWAP', a: 'BDELTA', b: 'WQUAI' },
+  { label: 'BDELTA / WQUAI · Quainance', dex: 'QUAINANCE', a: 'BDELTA', b: 'WQUAI' }
 ];
 
 type Mode = 'ADD' | 'REMOVE';
@@ -95,6 +98,7 @@ const chip: React.CSSProperties = {
 const lpName = (dex: DexId) => (dex === 'CIRCLESWAP' ? 'CSLP' : 'LP');
 
 export default function PoolModal({ walletAddress, rawBalances, pools, lpBalances, onConnect, onClose, onDone }: Props) {
+  const poolTokens = Object.values(TOKEN_REGISTRY).filter(t => t.deployed !== false);
   const [mode, setMode] = useState<Mode>('ADD');
   const [dex, setDex] = useState<DexId>(isDexLive('CIRCLESWAP') ? 'CIRCLESWAP' : 'QUAISWAP');
   const [symA, setSymA] = useState('BDELTA');
@@ -128,6 +132,11 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
   const dexLive = isDexLive(dex);
   const dexLabel = DEXES[dex].label;
   const lp = lpName(dex);
+  const nativeQuai = dex === 'CIRCLESWAP' && (symA === 'QUAI' || symB === 'QUAI');
+  const pairSymbol = (sym: string) => nativeQuai && sym === 'QUAI' ? 'WQUAI' : sym;
+  const pairAddress = (sym: string) => TOKEN_REGISTRY[pairSymbol(sym)].address;
+  const pairSymA = pairSymbol(symA);
+  const pairSymB = pairSymbol(symB);
 
   // Look the pair up on the chosen DEX whenever the selection changes (and after each transaction).
   useEffect(() => {
@@ -140,7 +149,7 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
     setPairLoading(true);
     (async () => {
       try {
-        const addr = await getPairAddress(dex, symA, symB);
+        const addr = await getPairAddress(dex, pairSymA, pairSymB);
         if (!live) return;
         setPair(addr);
         if (addr) {
@@ -163,17 +172,17 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
     return () => {
       live = false;
     };
-  }, [dex, symA, symB, sameToken, dexLive, dexLabel, walletAddress, refresh]);
+  }, [dex, symA, symB, pairSymA, pairSymB, sameToken, dexLive, dexLabel, walletAddress, refresh]);
 
   // Reserve of A / B in the pool's own token order.
   const resAB = useMemo(() => {
     if (!reserves) return null;
-    const aIsToken0 = reserves.token0.toLowerCase() === tokA.address.toLowerCase();
+    const aIsToken0 = reserves.token0.toLowerCase() === pairAddress(symA).toLowerCase();
     return {
       a: BigInt(aIsToken0 ? reserves.reserve0 : reserves.reserve1),
       b: BigInt(aIsToken0 ? reserves.reserve1 : reserves.reserve0)
     };
-  }, [reserves, tokA]);
+  }, [reserves, symA, pairSymA, nativeQuai]);
   const poolHasLiquidity = !!resAB && resAB.a > 0n && resAB.b > 0n;
 
   const parse = (v: string): bigint | null => {
@@ -224,7 +233,7 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
   const tooSmall = lpEstimate === 0n;
 
   // ---- remove mode ----------------------------------------------------------------------------------------
-  const aIsToken0 = !!position && position.token0.toLowerCase() === tokA.address.toLowerCase();
+  const aIsToken0 = !!position && position.token0.toLowerCase() === pairAddress(symA).toLowerCase();
   const removeLiq = position ? (pct >= 100 ? position.balance : (position.balance * BigInt(pct)) / 100n) : 0n;
   const removeOut = position ? lpUnderlying(removeLiq, position.totalSupply, position.reserve0, position.reserve1) : null;
   const removeA = removeOut ? (aIsToken0 ? removeOut[0] : removeOut[1]) : null;
@@ -247,6 +256,17 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
     setSymB(p.tokens[1]);
     setError(null);
     setDoneTx(null);
+  };
+  const changeDex = (next: DexId) => {
+    // Native QUAI is only supported by Circleswap's add/removeLiquidityETH entrypoints. Keep the
+    // external DEX forms on their explicit WQUAI token instead of ever querying a zero address.
+    if (next !== 'CIRCLESWAP') {
+      if (symA === 'QUAI') setSymA('WQUAI');
+      if (symB === 'QUAI') setSymB('WQUAI');
+    }
+    setDex(next);
+    setAmtA('');
+    setAmtB('');
   };
   const switchMode = (m: Mode) => {
     setMode(m);
@@ -280,11 +300,11 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
       setStep('PREPARING');
 
       // Re-read the pair at signing time: someone may have created it since the form was opened.
-      const livePair = await getPairAddress(dex, symA, symB);
+      const livePair = await getPairAddress(dex, pairSymA, pairSymB);
       let liveRes: { a: bigint; b: bigint } | null = null;
       if (livePair) {
         const r = await getLPReserves(livePair);
-        const aIs0 = r.token0.toLowerCase() === tokA.address.toLowerCase();
+        const aIs0 = r.token0.toLowerCase() === pairAddress(symA).toLowerCase();
         liveRes = { a: BigInt(aIs0 ? r.reserve0 : r.reserve1), b: BigInt(aIs0 ? r.reserve1 : r.reserve0) };
       }
       const liveHasLiquidity = !!liveRes && liveRes.a > 0n && liveRes.b > 0n;
@@ -298,6 +318,7 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
         [tokA, a, 'APPROVE_A'],
         [tokB, b, 'APPROVE_B']
       ] as const) {
+        if (tok.isNative) continue;
         const allowance = await getAllowance(tok.address, walletAddress, router);
         if (allowance >= amt) continue;
         setStep(stepName);
@@ -311,20 +332,32 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
       }
 
       setStep('PREPARING');
-      const data = encodeAddLiquidity({
-        tokenA: tokA.address,
-        tokenB: tokB.address,
-        amountADesired: a,
-        amountBDesired: b,
-        amountAMin: minA,
-        amountBMin: minB,
-        to: walletAddress,
-        deadline: BigInt(Math.floor(Date.now() / 1000) + 1200)
-      });
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
+      const nativeOnA = nativeQuai && symA === 'QUAI';
+      const nativeAmount = nativeOnA ? a : nativeQuai ? b : 0n;
+      const data = nativeQuai
+        ? encodeAddLiquidityETH({
+            token: pairAddress(nativeOnA ? symB : symA),
+            amountTokenDesired: nativeOnA ? b : a,
+            amountTokenMin: nativeOnA ? minB : minA,
+            amountETHMin: nativeOnA ? minA : minB,
+            to: walletAddress,
+            deadline
+          })
+        : encodeAddLiquidity({
+            tokenA: tokA.address,
+            tokenB: tokB.address,
+            amountADesired: a,
+            amountBDesired: b,
+            amountAMin: minA,
+            amountBMin: minB,
+            to: walletAddress,
+            deadline
+          });
       // Creating the pair deploys a contract, which costs far more than the simulator's estimate.
-      const prepared = await prepareContractCall(walletAddress, router, data, livePair ? 1.5 : 3);
+      const prepared = await prepareContractCall(walletAddress, router, data, livePair ? 1.5 : 3, undefined, nativeAmount);
       setFeeNote(
-        `Gas limit ${prepared.gasLimit.toString()}: at the current gas price this can cost up to ${formatUnits(prepared.maxFee, 18, 2)} QUAI (unused gas is refunded).`
+        `Gas limit ${prepared.gasLimit.toString()}: gas can cost up to ${formatUnits(prepared.maxFee, 18, 2)} QUAI${nativeQuai ? `, plus up to ${formatUnits(nativeAmount, 18, 2)} QUAI supplied as liquidity` : ''} (unused gas is refunded).`
       );
 
       setStep('ADD');
@@ -333,7 +366,7 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
       setDoneKind('ADD');
       await waitForReceipt(txHash);
 
-      setCreatedPair(await getPairAddress(dex, symA, symB));
+      setCreatedPair(await getPairAddress(dex, pairSymA, pairSymB));
       setAmtA('');
       setAmtB('');
       setRefresh(n => n + 1);
@@ -365,14 +398,14 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
 
       // Everything the withdrawal is priced from is read again now, so the minimums are not built from the
       // page-load reserves and "100%" really is the whole balance at signing time.
-      const livePair = await getPairAddress(dex, symA, symB);
+      const livePair = await getPairAddress(dex, pairSymA, pairSymB);
       if (!livePair) throw new Error(`No ${symA}/${symB} pool exists on ${dexLabel}.`);
       const fresh = await getLpPosition(livePair, walletAddress);
       const liq = pct >= 100 ? fresh.balance : (fresh.balance * BigInt(pct)) / 100n;
       if (liq <= 0n) throw new Error(`You hold no ${lp} in this pool.`);
 
       const [u0, u1] = lpUnderlying(liq, fresh.totalSupply, fresh.reserve0, fresh.reserve1);
-      const freshAIs0 = fresh.token0.toLowerCase() === tokA.address.toLowerCase();
+      const freshAIs0 = fresh.token0.toLowerCase() === pairAddress(symA).toLowerCase();
       const [minA, minB] = removeLiquidityMins(freshAIs0 ? u0 : u1, freshAIs0 ? u1 : u0, slippage);
 
       // The router pulls the LP tokens from the wallet, so it needs an allowance on the LP token itself.
@@ -389,15 +422,26 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
       }
 
       setStep('PREPARING');
-      const data = encodeRemoveLiquidity({
-        tokenA: tokA.address,
-        tokenB: tokB.address,
-        liquidity: liq,
-        amountAMin: minA,
-        amountBMin: minB,
-        to: walletAddress,
-        deadline: BigInt(Math.floor(Date.now() / 1000) + 1200)
-      });
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
+      const nativeOnA = nativeQuai && symA === 'QUAI';
+      const data = nativeQuai
+        ? encodeRemoveLiquidityETH({
+            token: pairAddress(nativeOnA ? symB : symA),
+            liquidity: liq,
+            amountTokenMin: nativeOnA ? minB : minA,
+            amountETHMin: nativeOnA ? minA : minB,
+            to: walletAddress,
+            deadline
+          })
+        : encodeRemoveLiquidity({
+            tokenA: tokA.address,
+            tokenB: tokB.address,
+            liquidity: liq,
+            amountAMin: minA,
+            amountBMin: minB,
+            to: walletAddress,
+            deadline
+          });
       const prepared = await prepareContractCall(walletAddress, router, data, 1.5);
       setFeeNote(
         `Gas limit ${prepared.gasLimit.toString()}: at the current gas price this can cost up to ${formatUnits(prepared.maxFee, 18, 2)} QUAI (unused gas is refunded).`
@@ -467,14 +511,16 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
           <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
             {PRESETS.map(p => {
               const live = isDexLive(p.dex);
+              const tokensReady = TOKEN_REGISTRY[p.a]?.deployed !== false && TOKEN_REGISTRY[p.b]?.deployed !== false;
+              const enabled = live && tokensReady;
               return (
                 <button
                   key={p.label}
                   type="button"
                   onClick={() => applyPreset(p)}
-                  disabled={busy || !live}
-                  title={live ? undefined : `${DEXES[p.dex].label} is not deployed yet`}
-                  style={{ ...select, fontSize: '0.72rem', cursor: live ? 'pointer' : 'not-allowed', opacity: live ? 1 : 0.45, borderColor: dex === p.dex && symA === p.a && symB === p.b ? 'var(--accent-plasma)' : 'var(--panel-border)' }}
+                  disabled={busy || !enabled}
+                  title={!live ? `${DEXES[p.dex].label} is not deployed yet` : !tokensReady ? 'QRB is not deployed yet' : undefined}
+                  style={{ ...select, fontSize: '0.72rem', cursor: enabled ? 'pointer' : 'not-allowed', opacity: enabled ? 1 : 0.45, borderColor: dex === p.dex && symA === p.a && symB === p.b ? 'var(--accent-plasma)' : 'var(--panel-border)' }}
                 >
                   {p.label}
                 </button>
@@ -512,7 +558,7 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
 
         <div style={{ ...box, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
           <span style={{ fontSize: '0.8rem', ...muted }}>DEX</span>
-          <select value={dex} onChange={e => setDex(e.target.value as DexId)} disabled={busy} style={select}>
+          <select value={dex} onChange={e => changeDex(e.target.value as DexId)} disabled={busy} style={select}>
             {Object.values(DEXES).map(d => (
               <option key={d.id} value={d.id} disabled={!isDexLive(d.id)}>
                 {d.label}{isDexLive(d.id) ? '' : ' (not deployed yet)'}
@@ -522,9 +568,20 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
         </div>
 
         {dex === 'CIRCLESWAP' && dexLive && (
-          <div style={{ fontSize: '0.72rem', ...muted, marginBottom: '0.75rem', lineHeight: 1.45 }}>
-            Circleswap is our own AMM: a 0.3% fee on every swap goes to the pool, and your share is a standard ERC-20 token ({lp}) you can hold or stake.
-            The first deposit into a pool permanently locks a tiny amount of it. These contracts are new and have not been independently audited.
+          <div style={{ ...box, fontSize: '0.72rem', ...muted, marginBottom: '0.75rem', lineHeight: 1.45 }}>
+            <strong style={{ color: '#fff' }}>Circleswap liquidity path</strong>
+            <div style={{ marginTop: '0.25rem' }}>
+              A 0.3% fee stays in the pool and your share is a standard ERC-20 ({lp}). The first deposit permanently locks a tiny amount and sets the initial price.
+            </div>
+            {(symA === 'QRB' || symB === 'QRB') ? (
+              <div style={{ marginTop: '0.4rem', color: 'var(--accent-amber, #f59e0b)' }}>
+                QRB is the fixed 1.0-supply genesis token. Seed QRB / Q0 at the intended market ratio; do not use MAX unless you mean to commit that entire QRB balance. The resulting route can continue through Q0 → BDELTA on Circleswap and then BDELTA / WQUAI on Quainance.
+              </div>
+            ) : (
+              <div style={{ marginTop: '0.4rem' }}>
+                For the cross-DEX bridge, create QRB / Q0 first, then BDELTA / Q0 on Circleswap. BDELTA / WQUAI on Quainance is the external liquidity leg.
+              </div>
+            )}
           </div>
         )}
 
@@ -561,7 +618,7 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
                   </span>
                 )}
                 <select value={sym} onChange={e => { setSym(e.target.value); setAmtA(''); setAmtB(''); }} disabled={busy} style={select}>
-                  {POOL_TOKENS.map(t => (
+                  {poolTokens.filter(t => !t.isNative || dex === 'CIRCLESWAP').map(t => (
                     <option key={t.symbol} value={t.symbol}>{t.symbol}</option>
                   ))}
                 </select>
@@ -573,6 +630,11 @@ export default function PoolModal({ walletAddress, rawBalances, pools, lpBalance
         {mode === 'ADD' && (symA === 'WQUAI' || symB === 'WQUAI') && (
           <div style={{ fontSize: '0.72rem', ...muted, marginBottom: '0.75rem' }}>
             WQUAI is wrapped QUAI. It is a separate token, so you need a WQUAI balance (wrap some native QUAI first); your native QUAI is not used.
+          </div>
+        )}
+        {mode === 'ADD' && nativeQuai && (
+          <div style={{ fontSize: '0.72rem', ...muted, marginBottom: '0.75rem', lineHeight: 1.45 }}>
+            Native QUAI is supplied directly to Circleswap and wrapped into WQUAI by the router. The on-chain pair is therefore {symA === 'QUAI' ? symB : symA} / WQUAI, while this form lets you deposit and withdraw in native QUAI.
           </div>
         )}
 

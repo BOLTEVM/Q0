@@ -140,5 +140,7 @@ export function getTokenBySymbol(symbol: string): TokenInfo | undefined {
 
 export function getTokenByAddress(address: string): TokenInfo | undefined {
     const clean = address.toLowerCase();
-    return REGISTERED_TOKENS.find(t => t.address.toLowerCase() === clean);
+    // Use the live registry object rather than the startup snapshot so the browser can safely register
+    // user-imported ERC-20 metadata for pool discovery without changing the generated token list.
+    return Object.values(TOKEN_REGISTRY).find(t => t.address.toLowerCase() === clean);
 }

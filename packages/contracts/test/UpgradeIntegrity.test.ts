@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { ethers, network } from "hardhat";
-import { Wallet, getCreateAddress } from "quais";
+import { getCreateAddress } from "quais";
+import { cyprus1Account, atCyprus1 } from "./cyprus1";
 import {
   ammFlow,
   runFlow,
@@ -14,7 +15,9 @@ import {
   listOperations,
   describeCall,
   isCyprus1QuaiAddress,
+  TIMELOCK_ROLES,
   CIRCLESWAP_ARTIFACTS,
+  type AmmFlowConfig,
   type Reader,
   type RunnerEnv
 } from "../../quai-service/src/deploy";
@@ -31,27 +34,6 @@ const reader: Reader = {
   getStorageAt: (a, slot) => ethers.provider.getStorage(a, slot)
 };
 
-/** An account that is a valid Cyprus-1 address (the flow refuses any other), funded and usable through impersonation. */
-async function cyprus1Account(seed: number): Promise<string> {
-  for (let i = seed; i < seed + 100_000; i++) {
-    const w = new Wallet("0x" + i.toString(16).padStart(64, "0"));
-    if (isCyprus1QuaiAddress(w.address)) {
-      await network.provider.send("hardhat_setBalance", [w.address, "0x" + (10n ** 24n).toString(16)]);
-      await network.provider.send("hardhat_impersonateAccount", [w.address]);
-      return w.address;
-    }
-  }
-  throw new Error("no Cyprus-1 account found");
-}
-
-let nextAt = 20_000;
-/** A Cyprus-1 address holding a copy of `contract`'s code, for builders that (rightly) refuse any other address. */
-async function atCyprus1(contract: { getAddress(): Promise<string> }): Promise<string> {
-  const to = await cyprus1Account(nextAt);
-  nextAt += 500;
-  await network.provider.send("hardhat_setCode", [to, await ethers.provider.getCode(await contract.getAddress())]);
-  return to;
-}
 
 /** The runner's `quai_*` calls and wallet, backed by Hardhat. The "wallet" signs as the impersonated account. */
 function env(from: string): RunnerEnv {
@@ -77,13 +59,13 @@ function env(from: string): RunnerEnv {
 }
 
 /** Runs the real browser flow end to end on Hardhat and returns the deployed addresses. */
-async function deployThroughTheFlow(proposer: string, delaySeconds = 2 * DAY, from?: string) {
+async function deployThroughTheFlow(proposer: string, delaySeconds = 2 * DAY, from?: string, extra: Partial<AmmFlowConfig> = {}) {
   const deployer = from ?? (await cyprus1Account(7_000));
   // The flow (rightly) refuses a WQUAI that is not a Cyprus-1 address, so put the mock's code at one.
   const wquai = await (await ethers.getContractFactory("MockWQUAI")).deploy();
   const wquaiAddr = await cyprus1Account(5_000);
   await network.provider.send("hardhat_setCode", [wquaiAddr, await ethers.provider.getCode(await wquai.getAddress())]);
-  const flow = ammFlow({ proposer, delaySeconds, wquai: wquaiAddr });
+  const flow = ammFlow({ proposer, delaySeconds, wquai: wquaiAddr, ...extra });
   const progress = emptyProgress("AMM", 9, deployer);
   await runFlow(env(deployer), flow, progress);
   return { ctx: progress.ctx, deployer, wquai, wquaiAddr, flow };
@@ -138,6 +120,34 @@ describe("upgrade integrity: the browser deployment flow and the inspector, agai
       expect(() => ammFlow({ ...base, delaySeconds: DAY - 1 })).to.throw("between 1 day and 30 days");
       expect(() => ammFlow({ ...base, delaySeconds: 31 * DAY })).to.throw("between 1 day and 30 days");
       expect(() => ammFlow({ ...base, proposer: "0x1111111111111111111111111111111111111111" })).to.throw("Cyprus-1");
+    });
+
+    it("names guardians that can cancel but not propose, and refuses a guardian that is the proposer", async function () {
+      const guardian = await cyprus1Account(11_000);
+      const { ctx } = await deployThroughTheFlow(proposer, 2 * DAY, undefined, { guardians: [guardian] });
+      const timelock = await ethers.getContractAt("CircleswapTimelock", ctx.AMM_TIMELOCK);
+      expect(await timelock.hasRole(await timelock.CANCELLER_ROLE(), guardian)).to.equal(true);
+      expect(await timelock.hasRole(await timelock.PROPOSER_ROLE(), guardian)).to.equal(false);
+      const base = { proposer, wquai: proposer, delaySeconds: 2 * DAY };
+      expect(() => ammFlow({ ...base, guardians: [proposer] })).to.throw("different account from the proposer");
+      expect(() => ammFlow({ ...base, guardians: [guardian, guardian] })).to.throw("listed twice");
+      expect(() => ammFlow({ ...base, guardians: ["0x1111111111111111111111111111111111111111"] })).to.throw("Cyprus-1");
+    });
+
+    it("the pool-placement probe runs at the end, creates nothing, and its verdict is enforced", async function () {
+      const Token = await ethers.getContractFactory("MockToken");
+      const a = await atCyprus1(await Token.deploy("A", "A", 18));
+      const b = await atCyprus1(await Token.deploy("B", "B", 18));
+
+      // accepted: the deployment completes, and no pool was made by probing
+      const ok = await deployThroughTheFlow(proposer, 2 * DAY, undefined, { probe: { tokens: [a, b], checkPoolAddress: () => {} } });
+      const factory = await ethers.getContractAt("CircleswapFactory", ok.ctx.AMM_FACTORY);
+      expect(await factory.allPairsLength()).to.equal(0n);
+
+      // rejected: the last step fails, and says where the pool would have landed
+      await expect(
+        deployThroughTheFlow(proposer, 2 * DAY, undefined, { probe: { tokens: [a, b], checkPoolAddress: () => { throw new Error("outside the zone"); } } })
+      ).to.be.rejectedWith("a pool made by this factory would land at");
     });
 
     it("a pool created on the deployed system works end to end through the deployed router", async function () {
@@ -229,6 +239,96 @@ describe("upgrade integrity: the browser deployment flow and the inspector, agai
       const r = await inspectAmm(reader, { factory: ctx.AMM_FACTORY, router: ctx.AMM_ROUTER });
       expect(r.facts.ownerKind).to.equal("renounced");
       expect(r.verdict).to.equal("IMMUTABLE_POOLS");
+    });
+
+    it("a router owned by a person is UNSAFE even when the factory beside it is governed by a timelock", async function () {
+      const { ctx } = await deployThroughTheFlow(proposer);
+      const [person] = await ethers.getSigners();
+      const Router = await ethers.getContractFactory("CircleswapRouter");
+      const impl = await Router.deploy();
+      const wquai = await (await ethers.getContractFactory("MockWQUAI")).deploy();
+      const proxy = await (await ethers.getContractFactory("ERC1967Proxy")).deploy(
+        await impl.getAddress(),
+        Router.interface.encodeFunctionData("initialize", [ctx.AMM_FACTORY, await wquai.getAddress(), person.address])
+      );
+      const r = await inspectAmm(reader, { factory: ctx.AMM_FACTORY, router: await proxy.getAddress() });
+      expect(r.facts.ownerKind).to.equal("timelock"); // the factory is fine
+      expect(r.facts.routerOwnerKind).to.equal("account");
+      expect(levels(r)["router.owner.kind"]).to.equal("fail");
+      expect(r.checks.find(c => c.id === "router.owner.kind")!.detail).to.contain("spend every token approval");
+      expect(r.verdict).to.equal("UNSAFE");
+    });
+
+    it("a renounced router next to a timelock-owned factory is called permanent, not a warning", async function () {
+      const { ctx } = await deployThroughTheFlow(proposer);
+      const [, alice] = await ethers.getSigners();
+      const proposerSigner = await ethers.getSigner(proposer);
+      const op = OPS.makeRouterPermanent({ factory: ctx.AMM_FACTORY, router: ctx.AMM_ROUTER, timelock: ctx.AMM_TIMELOCK });
+      const { tx, salt } = scheduleTx(ctx.AMM_TIMELOCK, op, 2 * DAY);
+      await proposerSigner.sendTransaction(tx);
+      await network.provider.send("evm_increaseTime", [2 * DAY + 5]);
+      await network.provider.send("evm_mine");
+      await alice.sendTransaction(executeTx(ctx.AMM_TIMELOCK, op.target, op.data, salt));
+      const r = await inspectAmm(reader, { factory: ctx.AMM_FACTORY, router: ctx.AMM_ROUTER });
+      expect(r.facts.routerOwnerKind).to.equal("renounced");
+      expect(r.facts.ownerKind).to.equal("timelock");
+      expect(levels(r)["router.owner.kind"]).to.equal("pass");
+      expect(r.checks.some(c => c.level === "warn")).to.equal(false);
+      expect(r.verdict).to.equal("GOVERNED"); // pools are not frozen yet
+    });
+
+    it("a router owned by a lookalike contract is not trusted either", async function () {
+      const { ctx } = await deployThroughTheFlow(proposer);
+      const [, alice] = await ethers.getSigners();
+      const Router = await ethers.getContractFactory("CircleswapRouter");
+      const impl = await Router.deploy();
+      const wquai = await (await ethers.getContractFactory("MockWQUAI")).deploy();
+      // owned by some contract that is not the compiled timelock (here, the WQUAI token)
+      const proxy = await (await ethers.getContractFactory("ERC1967Proxy")).deploy(
+        await impl.getAddress(),
+        Router.interface.encodeFunctionData("initialize", [ctx.AMM_FACTORY, await wquai.getAddress(), await wquai.getAddress()])
+      );
+      const r = await inspectAmm(reader, { factory: ctx.AMM_FACTORY, router: await proxy.getAddress() });
+      expect(r.facts.routerOwnerKind).to.equal("contract");
+      expect(levels(r)["router.owner.kind"]).to.equal("warn");
+      expect(r.verdict).to.equal("UNSAFE");
+      void alice;
+    });
+
+    it("an imitation padded to the right length is not accepted as the real contract (proxy, implementation or timelock)", async function () {
+      const { ctx } = await deployThroughTheFlow(proposer);
+      const flip = async (address: string) => {
+        const code = await ethers.provider.getCode(address);
+        const at = 2 + 2 * 50; // a byte in the executable region, outside every immutable and the metadata trailer
+        const flipped = code.slice(0, at) + (parseInt(code.slice(at, at + 2), 16) ^ 1).toString(16).padStart(2, "0") + code.slice(at + 2);
+        expect(flipped.length).to.equal(code.length); // exactly the same length: a length check cannot tell
+        await network.provider.send("hardhat_setCode", [address, flipped]);
+      };
+      const run = () => inspectAmm(reader, { factory: ctx.AMM_FACTORY, router: ctx.AMM_ROUTER });
+      expect((await run()).verdict).to.equal("GOVERNED");
+
+      await flip(ctx.AMM_FACTORY_IMPL);
+      let r = await run();
+      expect(levels(r)["factory.impl"]).to.equal("fail");
+      expect(r.checks.find(c => c.id === "factory.impl")!.detail).to.contain("imitation");
+      expect(r.verdict).to.equal("UNSAFE");
+
+      await flip(ctx.AMM_ROUTER);
+      r = await run();
+      expect(levels(r)["router.proxy"]).to.equal("fail");
+      expect(r.checks.find(c => c.id === "router.proxy")!.detail).to.contain("imitation");
+
+    });
+
+    it("a lookalike timelock (same length, different code) is an unknown contract: its delay is not taken on trust", async function () {
+      const { ctx } = await deployThroughTheFlow(proposer);
+      const code = await ethers.provider.getCode(ctx.AMM_TIMELOCK);
+      const at = 2 + 2 * 50;
+      const flipped = code.slice(0, at) + (parseInt(code.slice(at, at + 2), 16) ^ 1).toString(16).padStart(2, "0") + code.slice(at + 2);
+      await network.provider.send("hardhat_setCode", [ctx.AMM_TIMELOCK, flipped]);
+      const r = await inspectAmm(reader, { factory: ctx.AMM_FACTORY, router: ctx.AMM_ROUTER });
+      expect(r.facts.ownerKind).to.equal("contract");
+      expect(r.verdict).to.equal("UNSAFE");
     });
 
     it("an upgrade to code that is not the compiled contract is called out", async function () {
@@ -353,6 +453,43 @@ describe("upgrade integrity: the browser deployment flow and the inspector, agai
       const factory = await ethers.getContractAt("CircleswapFactory", ctx.AMM_FACTORY);
       expect(await factory.feeTo()).to.equal(proposer);
       expect(await factory.pairImplementation()).to.not.equal(rug.data.slice(-40)); // the cancelled upgrade never ran
+    });
+
+    it("roles on the timelock can be rotated, but only through the timelock itself, after the delay", async function () {
+      const { ctx } = await deployThroughTheFlow(proposer);
+      const [, alice] = await ethers.getSigners();
+      const proposerSigner = await ethers.getSigner(proposer);
+      const newProposer = await cyprus1Account(13_000);
+      const guardian = await cyprus1Account(14_000);
+      const t = { factory: ctx.AMM_FACTORY, router: ctx.AMM_ROUTER, timelock: ctx.AMM_TIMELOCK };
+      const timelock = await ethers.getContractAt("CircleswapTimelock", ctx.AMM_TIMELOCK);
+
+      // Nobody (not even the current proposer) can change roles directly: the timelock is its own administrator.
+      await expect(timelock.connect(proposerSigner).grantRole(TIMELOCK_ROLES.proposer, newProposer)).to.be.reverted;
+
+      const run = async (op: ReturnType<typeof OPS.grantRole>) => {
+        const { tx, salt } = scheduleTx(ctx.AMM_TIMELOCK, op, 2 * DAY);
+        await proposerSigner.sendTransaction(tx);
+        await expect(alice.sendTransaction(executeTx(ctx.AMM_TIMELOCK, op.target, op.data, salt))).to.be.reverted; // too early
+        await network.provider.send("evm_increaseTime", [2 * DAY + 5]);
+        await network.provider.send("evm_mine");
+        await alice.sendTransaction(executeTx(ctx.AMM_TIMELOCK, op.target, op.data, salt));
+      };
+
+      // add a guardian (canceller only), then rotate the proposer: grant the new one, remove the old one
+      await run(OPS.grantRole(t, "canceller", guardian));
+      expect(await timelock.hasRole(TIMELOCK_ROLES.canceller, guardian)).to.equal(true);
+      expect(await timelock.hasRole(TIMELOCK_ROLES.proposer, guardian)).to.equal(false);
+      await run(OPS.grantRole(t, "proposer", newProposer));
+      expect(await timelock.hasRole(TIMELOCK_ROLES.proposer, newProposer)).to.equal(true);
+      await run(OPS.revokeRole(t, "proposer", proposer));
+      expect(await timelock.hasRole(TIMELOCK_ROLES.proposer, proposer)).to.equal(false);
+      await expect(timelock.connect(proposerSigner).schedule(ctx.AMM_FACTORY, 0, "0x", ethers.ZeroHash, ethers.id("x"), 2 * DAY)).to.be.reverted;
+
+      expect(describeCall(timelock.target as string, OPS.grantRole(t, "canceller", guardian).data, t)).to.equal(`Give the canceller role to ${guardian}`);
+      expect(describeCall(timelock.target as string, OPS.revokeRole(t, "proposer", proposer).data, t)).to.equal(`Remove the proposer role from ${proposer}`);
+      expect(describeCall(timelock.target as string, OPS.updateDelay(t, 3 * DAY).data, t)).to.equal("Change the timelock delay to 3 day(s)");
+      expect(() => OPS.grantRole(t, "proposer", "0x1111111111111111111111111111111111111111")).to.throw("Cyprus-1");
     });
 
     it("operations refuse bad arguments before they can be scheduled", function () {
