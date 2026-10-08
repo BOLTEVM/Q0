@@ -75,8 +75,8 @@ export class Q0SwapModule {
             to: quote.pairAddress,
             from: userAddress,
             value: quote.fromToken === 'WQUAI' ? BigInt(Math.floor(parseFloat(quote.fromAmount) * 1e18)) : BigInt(0),
-            data: '0x' + (typeof Buffer !== 'undefined'
-                ? Buffer.from(JSON.stringify({ swap: quote })).toString('hex')
+            data: '0x' + (typeof (globalThis as any).Buffer !== 'undefined'
+                ? (globalThis as any).Buffer.from(JSON.stringify({ swap: quote })).toString('hex')
                 : '00'),
             chainId: 9000, // Quai Network Cyprus-1 Chain ID
             rpcUrl: opts.rpcUrl || 'https://rpc.quai.network/cyprus1',
