@@ -118,9 +118,16 @@ function loadTokenBubbleMetadata(token: TokenInfo): Promise<TokenBubbleMetadata 
   return request;
 }
 
+const isLocalhost = typeof window !== 'undefined' && (
+  window.location.hostname === 'localhost' ||
+  window.location.hostname === '127.0.0.1' ||
+  window.location.hostname === '0.0.0.0' ||
+  import.meta.env.DEV
+);
+
 const getTabFromHash = (): 'SWAP' | 'FARMS' | 'QRB' | 'ANALYTICS' | 'PAIRS' | 'DEPLOY' => {
   const hash = typeof window !== 'undefined' ? window.location.hash.toLowerCase() : '';
-  if (hash === '#deploy') return 'DEPLOY';
+  if (hash === '#deploy') return isLocalhost ? 'DEPLOY' : 'SWAP';
   if (hash === '#farms') return 'FARMS';
   if (hash === '#qrb') return 'QRB';
   if (hash === '#analytics') return 'ANALYTICS';
@@ -892,7 +899,7 @@ export default function App() {
       <header>
         <div className="brand-section">
           <img 
-            src="/QgoGIF.gif" 
+            src={`${import.meta.env.BASE_URL}QgoGIF.gif`} 
             className="brand-logo" 
             alt="Circleswap Logo" 
             style={{ borderRadius: '50%', width: '48px', height: '48px', objectFit: 'cover', border: '1px solid rgba(255, 51, 68, 0.5)' }} 
@@ -971,12 +978,14 @@ export default function App() {
         >
           <Layers size={16} /> Pairs & Liquidity
         </button>
-        <button 
-          className={`circleswap-nav-btn ${activeTab === 'DEPLOY' ? 'active' : ''}`} 
-          onClick={() => navigateToTab('DEPLOY')}
-        >
-          <Rocket size={16} /> Deploy
-        </button>
+        {isLocalhost && (
+          <button 
+            className={`circleswap-nav-btn ${activeTab === 'DEPLOY' ? 'active' : ''}`} 
+            onClick={() => navigateToTab('DEPLOY')}
+          >
+            <Rocket size={16} /> Deploy
+          </button>
+        )}
       </nav>
 
       {/* Multi-Token Portfolio Ticker */}
@@ -1003,8 +1012,8 @@ export default function App() {
       {/* TAB 5: ALL PAIRS & LIQUIDITY */}
       {activeTab === 'PAIRS' && <PairsPage onOpenLiquidity={() => setPoolModalOpen(true)} />}
 
-      {/* TAB 6: DEPLOYMENT (lazy: carries the contracts' bytecode) */}
-      {activeTab === 'DEPLOY' && (
+      {/* TAB 6: DEPLOYMENT (lazy: carries the contracts' bytecode, localhost only) */}
+      {isLocalhost && activeTab === 'DEPLOY' && (
         <Suspense fallback={<div style={{ padding: '2rem', textAlign: 'center' }}>Loading deployment tools…</div>}>
           <DeployPage
             walletAddress={walletAddress}
@@ -1397,7 +1406,7 @@ export default function App() {
             {/* Holographic Containment Pod with QgoGIF */}
             <div className="qrb-artwork-pod">
               <div className="qrb-gif-viewport">
-                <img src="/QgoGIF.gif" alt="Circleswap Qrb 1-of-1 Genesis Singularity" />
+                <img src={`${import.meta.env.BASE_URL}QgoGIF.gif`} alt="Circleswap Qrb 1-of-1 Genesis Singularity" />
                 <div style={{ position: 'absolute', bottom: 12, left: 12, background: 'rgba(0,0,0,0.7)', border: '1px solid rgba(255,51,68,0.4)', padding: '0.35rem 0.75rem', borderRadius: '8px', fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-plasma)', backdropFilter: 'blur(8px)' }}>
                   Singularity Core: Active
                 </div>

@@ -60,7 +60,7 @@ export default function ArtworkModal({ onClose, onChanged }: Props) {
 
   const useBundled = async () => {
     try {
-      const res = await fetch('/QgoGIF.gif');
+      const res = await fetch(`${import.meta.env.BASE_URL}QgoGIF.gif`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await take(await res.blob(), 'QgoGIF.gif');
     } catch (e: any) {
